@@ -64,8 +64,10 @@ class Scene:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
+            if not os.path.exists(self.model_path):
+                os.mkdir(self.model_path)
             with open(scene_info.ply_path, "rb") as src_file, open(
-                os.path.join(self.model_path, "input.ply"), "wb"
+                os.path.join(self.model_path, "input.ply"), "wb+"
             ) as dest_file:
                 dest_file.write(src_file.read())
             json_cams = []
@@ -112,7 +114,8 @@ class Scene:
                 override_quantization=override_quantization
             )
         else:
-            raise Exception("no iteration to load was found")
+            self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            #raise Exception("no iteration to load was found")
 
     def save(self, iteration, format="ply"):
         point_cloud_path = os.path.join(

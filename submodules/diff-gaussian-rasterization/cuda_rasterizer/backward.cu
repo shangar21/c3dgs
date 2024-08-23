@@ -398,7 +398,7 @@ __global__ void preprocessCUDA(
 // Backward version of the rendering procedure.
 template <uint32_t C>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
-renderCUDA(
+renderCUDABackwards(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
@@ -638,7 +638,7 @@ void BACKWARD::render(
 	float* dL_dopacity,
 	float* dL_dcolors)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	renderCUDABackwards<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
 		point_list,
 		W, H,

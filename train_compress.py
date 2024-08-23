@@ -1,4 +1,14 @@
-# %%
+import os
+import sys
+import torch
+from random import randint
+from utils.loss_utils import l1_loss,  ssim
+from gaussian_renderer import render
+from scene import Scene
+import uuid
+from tqdm import tqdm
+from utils.image_utils import psnr
+from argparse import  Namespace
 import gc
 import json
 import os
@@ -11,6 +21,7 @@ from typing import Dict, Tuple
 
 import torch
 from tqdm import tqdm
+import nvtx
 
 # %%
 from arguments import (
@@ -27,15 +38,6 @@ from scene import Scene
 from finetune import finetune
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
-
-
-def unique_output_folder():
-    if os.getenv("OAR_JOB_ID"):
-        unique_str = os.getenv("OAR_JOB_ID")
-    else:
-        unique_str = str(uuid.uuid4())
-    return os.path.join("./output_vq/", unique_str[0:10])
-
 
 def calc_importance(
     gaussians: GaussianModel, scene, pipeline_params
@@ -83,6 +85,56 @@ def calc_importance(
     torch.cuda.empty_cache()
     return importance.detach(), cov_grad.detach()
 
+def initialize_gaussians(model_params, comp_params):
+    gaussians = GaussianModel(model_params.sh_degree if model_params.sh_degree else 3, quantization=True)
+    scene = Scene(model_params, gaussians, load_iteration="", shuffle=True)
+    return gaussians, scene
+
+def initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params):
+    print("Setting up compressed model...")
+    color_importance, gaussian_sensitivity = calc_importance(gaussians, scene, pipeline_params)
+    with torch.no_grad():
+        color_importance_n = color_importance.amax(-1)
+        gaussian_importance_n = gaussian_sensitivity.amax(-1)
+        torch.cuda.empty_cache()
+
+        color_compression_settings = CompressionSettings(
+            codebook_size=comp_params.color_codebook_size,
+            importance_prune=comp_params.color_importance_prune,
+            importance_include=comp_params.color_importance_include,
+            steps=int(comp_params.color_cluster_iterations),
+            decay=comp_params.color_decay,
+            batch_size=comp_params.color_batch_size,
+        )
+
+        gaussian_compression_settings = CompressionSettings(
+            codebook_size=comp_params.gaussian_codebook_size,
+            importance_prune=None,
+            importance_include=comp_params.gaussian_importance_include,
+            steps=int(comp_params.gaussian_cluster_iterations),
+            decay=comp_params.gaussian_decay,
+            batch_size=comp_params.gaussian_batch_size,
+        )
+        
+        compress_gaussians(
+            gaussians,
+            color_importance_n,
+            gaussian_importance_n,
+            color_compression_settings if not comp_params.not_compress_color else None,
+            gaussian_compression_settings
+            if not comp_params.not_compress_gaussians
+            else None,
+            comp_params.color_compress_non_dir,
+            prune_threshold=comp_params.prune_threshold,
+        )
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    os.makedirs(comp_params.output_vq, exist_ok=True)
+
+    model_params.model_path = comp_params.output_vq
+
+    return gaussians, scene
 
 def render_and_eval(
     gaussians: GaussianModel,
@@ -119,121 +171,61 @@ def render_and_eval(
         }
 
 
-def run_vq(
-    model_params: ModelParams,
-    optim_params: OptimizationParams,
-    pipeline_params: PipelineParams,
-    comp_params: CompressionParams,
-):
-    gaussians = GaussianModel(
-        model_params.sh_degree, quantization=not optim_params.not_quantization_aware
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser(description="Compression script parameters")
+    model = ModelParams(parser, sentinel=True)
+    model.data_device = "cuda"
+    pipeline = PipelineParams(parser)
+    op = OptimizationParams(parser)
+    comp = CompressionParams(parser)
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--debug_from', type=int, default=-1)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument('--disable_viewer', action='store_true', default=False)
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    args = parser.parse_args(sys.argv[1:])
+    args.save_iterations.append(args.iterations)
+
+    model_params = model.extract(args)
+    optim_params = op.extract(args)
+    pipeline_params = pipeline.extract(args)
+    comp_params = comp.extract(args)
+
+    comp_params.finetune_iterations = 0
+    if not model_params.sh_degree:
+        model_params.sh_degree = 3
+
+    gaussians, scene = initialize_gaussians(model_params, comp_params)
+    torch.cuda.nvtx.range_push("compress")
+    gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
+    torch.cuda.nvtx.range_pop()
+
+    comp_params.finetune_iterations = 3
+    scene.loaded_iter = 0
+
+    torch.cuda.nvtx.range_push("finetune")
+    finetune(
+        scene,
+        model_params,
+        optim_params,
+        comp_params,
+        pipeline_params,
+        testing_iterations=[-1],
+        debug_from = -1
     )
-    scene = Scene(
-        model_params, gaussians, load_iteration=comp_params.load_iteration, shuffle=True
-    )
+    torch.cuda.nvtx.range_pop()
 
-    if comp_params.start_checkpoint:
-        (checkpoint_params, first_iter) = torch.load(comp_params.start_checkpoint)
-        gaussians.restore(checkpoint_params, optim_params)
-
-
-    timings ={}
-
-    # %%
-
-    start_time = time.time()
-    color_importance, gaussian_sensitivity = calc_importance(
-        gaussians, scene, pipeline_params
-    )
-    end_time = time.time()
-    timings["sensitivity_calculation"] = end_time-start_time
-    # %%
-    print("vq compression..")
-    with torch.no_grad():
-        start_time = time.time()
-        color_importance_n = color_importance.amax(-1)
-
-        gaussian_importance_n = gaussian_sensitivity.amax(-1)
-
-        torch.cuda.empty_cache()
-
-        color_compression_settings = CompressionSettings(
-            codebook_size=comp_params.color_codebook_size,
-            importance_prune=comp_params.color_importance_prune,
-            importance_include=comp_params.color_importance_include,
-            steps=int(comp_params.color_cluster_iterations),
-            decay=comp_params.color_decay,
-            batch_size=comp_params.color_batch_size,
-        )
-
-        gaussian_compression_settings = CompressionSettings(
-            codebook_size=comp_params.gaussian_codebook_size,
-            importance_prune=None,
-            importance_include=comp_params.gaussian_importance_include,
-            steps=int(comp_params.gaussian_cluster_iterations),
-            decay=comp_params.gaussian_decay,
-            batch_size=comp_params.gaussian_batch_size,
-        )
-
-        compress_gaussians(
-            gaussians,
-            color_importance_n,
-            gaussian_importance_n,
-            color_compression_settings if not comp_params.not_compress_color else None,
-            gaussian_compression_settings
-            if not comp_params.not_compress_gaussians
-            else None,
-            comp_params.color_compress_non_dir,
-            prune_threshold=comp_params.prune_threshold,
-        )
-        end_time = time.time()
-        timings["clustering"]=end_time-start_time
-
-    gc.collect()
-    torch.cuda.empty_cache()
-    os.makedirs(comp_params.output_vq, exist_ok=True)
-
-    copyfile(
-        path.join(model_params.model_path, "cfg_args"),
-        path.join(comp_params.output_vq, "cfg_args"),
-    )
-    model_params.model_path = comp_params.output_vq
-
-    with open(
-        os.path.join(comp_params.output_vq, "cfg_args_comp"), "w"
-    ) as cfg_log_f:
-        cfg_log_f.write(str(Namespace(**vars(comp_params))))
-
-    iteration = scene.loaded_iter + comp_params.finetune_iterations
-    if comp_params.finetune_iterations > 0:
-
-        start_time = time.time()
-        finetune(
-            scene,
-            model_params,
-            optim_params,
-            comp_params,
-            pipeline_params,
-            testing_iterations=[
-                -1
-            ],
-            debug_from=-1,
-        )
-        end_time = time.time()
-        timings["finetune"]=end_time-start_time
-
-        # %%
+    iteration = comp_params.finetune_iterations
     out_file = path.join(
         comp_params.output_vq,
         f"point_cloud/iteration_{iteration}/point_cloud.npz",
     )
-    start_time = time.time()
     gaussians.save_npz(out_file, sort_morton=not comp_params.not_sort_morton)
-    end_time = time.time()
-    timings["encode"]=end_time-start_time
-    timings["total"]=sum(timings.values())
-    with open(f"{comp_params.output_vq}/times.json","w") as f:
-        json.dump(timings,f)
     file_size = os.path.getsize(out_file) / 1024**2
     print(f"saved vq finetuned model to {out_file}")
 
@@ -244,25 +236,3 @@ def run_vq(
     print(metrics)
     with open(f"{comp_params.output_vq}/results.json","w") as f:
         json.dump({f"ours_{iteration}":metrics},f,indent=4)
-
-if __name__ == "__main__":
-    parser = ArgumentParser(description="Compression script parameters")
-    model = ModelParams(parser, sentinel=True)
-    model.data_device = "cuda"
-    pipeline = PipelineParams(parser)
-    op = OptimizationParams(parser)
-    comp = CompressionParams(parser)
-    args = get_combined_args(parser)
-
-    if args.output_vq is None:
-        args.output_vq = unique_output_folder()
-
-    model_params = model.extract(args)
-    optim_params = op.extract(args)
-    pipeline_params = pipeline.extract(args)
-    comp_params = comp.extract(args)
-
-    if not model_params.sh_degree:
-        model_params.sh_degree = 3
-
-    run_vq(model_params, optim_params, pipeline_params, comp_params)
