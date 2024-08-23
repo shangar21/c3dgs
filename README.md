@@ -1,6 +1,6 @@
 <div align="center">
 
-# Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis
+# Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis - RI
 
 
 <font size="4">
