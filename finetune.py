@@ -8,6 +8,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import  Namespace
+import pdb
 
 def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from):
     prepare_output_and_logger(comp.output_vq, dataset)
@@ -53,7 +54,11 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (
             1.0 - ssim(image, gt_image)
         )
-        loss.backward()
+        try:
+            loss.backward()
+        except Exception as e:
+            print(e)
+            breakpoint()
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)
@@ -66,6 +71,15 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
                 progress_bar.update(10)
             if iteration == max_iter:
                 progress_bar.close()
+
+            scene.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+            if iteration > 250 and iteration % 100 == 0:
+                size_threshold = 20 if iteration > 300 else None
+                scene.gaussians.densify_and_prune(0.0002, 0.005, scene.cameras_extent, size_threshold)
+            
+            if iteration % 300 == 0:
+                scene.gaussians.reset_opacity()
 
             # Optimizer step
             if iteration < max_iter:
