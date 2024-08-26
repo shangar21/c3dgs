@@ -414,8 +414,10 @@ renderCUDABackwards(
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
+	unsigned balance_threshold = 8; 
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
+    const uint32_t laneId = (threadIdx.y * blockDim.x + threadIdx.x) & 31;
 	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
 	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
 	const uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
@@ -437,7 +439,7 @@ renderCUDABackwards(
 	__shared__ float collected_colors[C * BLOCK_SIZE];
 
 	// In the forward, we stored the final value for T, the
-	// product of all (1 - alpha) factors. 
+	// product of all (1 - alpha) factors.
 	const float T_final = inside ? final_Ts[pix_id] : 0;
 	float T = T_final;
 
@@ -455,7 +457,7 @@ renderCUDABackwards(
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
 
-	// Gradient of pixel coordinate w.r.t. normalized 
+	// Gradient of pixel coordinate w.r.t. normalized
 	// screen-space viewport corrdinates (-1 to 1)
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
@@ -479,13 +481,21 @@ renderCUDABackwards(
 		block.sync();
 
 		// Iterate over Gaussians
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
 		{
-			// Keep track of current Gaussian ID. Skip, if this one
-			// is behind the last contributor for this pixel.
-			contributor--;
-			if (contributor >= last_contributor)
-				continue;
+			__syncwarp();
+			// DISTWAR - instead of allowing threads to continue to next loop iteration
+			//           we instead make these inactive threads also participate in the atomic updates
+			//           we mark these threads by setting this skip flag to true
+			bool skip = done;
+			if (!skip) {
+				// Keep track of current Gaussian ID. Skip, if this one
+				// is behind the last contributor for this pixel.
+				contributor--;
+
+				if (contributor >= last_contributor)
+					skip = true;
+			}
 
 			// Compute blending values, as before.
 			const float2 xy = collected_xy[j];
@@ -493,14 +503,20 @@ renderCUDABackwards(
 			const float4 con_o = collected_conic_opacity[j];
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
-				continue;
+				skip = true;
 
 			const float G = exp(power);
 			const float alpha = min(0.99f, con_o.w * G);
 			if (alpha < 1.0f / 255.0f)
-				continue;
+				skip = true;
 
-			T = T / (1.f - alpha);
+			// DISTWAR - after alpha copmutation, check if there is any active thread
+			//           if there is no active thread, all threads skip to next iteration
+            int active_ct = __popc(__ballot_sync(__activemask(), !skip));
+			if (active_ct == 0) continue;
+
+			if (!skip)
+				T = T / (1.f - alpha);
 			const float dchannel_dcolor = alpha * T;
 
 			// Propagate gradients to per-Gaussian colors and keep
@@ -508,23 +524,28 @@ renderCUDABackwards(
 			// pair).
 			float dL_dalpha = 0.0f;
 			const int global_id = collected_id[j];
-			for (int ch = 0; ch < C; ch++)
-			{
-				const float c = collected_colors[ch * BLOCK_SIZE + j];
-				// Update last color (to be used in the next iteration)
-				accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
-				last_color[ch] = c;
+			float dcolors[C] = { 0 };
 
-				const float dL_dchannel = dL_dpixel[ch];
-				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
-				// Update the gradients w.r.t. color of the Gaussian. 
-				// Atomic, since this pixel is just one of potentially
-				// many that were affected by this Gaussian.
-				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
+			if (!skip) {
+				for (int ch = 0; ch < C; ch++) {
+					const float c = collected_colors[ch * BLOCK_SIZE + j];
+					// Update last color (to be used in the next iteration)
+					accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
+					last_color[ch] = c;
+
+					const float dL_dchannel = dL_dpixel[ch];
+					dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
+
+					// DISTWAR - cache color updates
+					dcolors[ch] = dchannel_dcolor * dL_dchannel;
+				}
 			}
+
+
 			dL_dalpha *= T;
 			// Update last alpha (to be used in the next iteration)
-			last_alpha = alpha;
+			if (!skip)
+				last_alpha = alpha;
 
 			// Account for fact that alpha also influences how much of
 			// the background color is added if nothing left to blend
@@ -532,7 +553,7 @@ renderCUDABackwards(
 			for (int i = 0; i < C; i++)
 				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
 			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
-
+			
 
 			// Helpful reusable temporary variables
 			const float dL_dG = con_o.w * dL_dalpha;
@@ -541,17 +562,55 @@ renderCUDABackwards(
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
 			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
-			// Update gradients w.r.t. 2D mean position of the Gaussian
-			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
-			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+			// DISTWAR - inactive threads does not have gradient contribution (set to 0.0f)
+			float dmeanX = skip ? 0.0f : dL_dG * dG_ddelx * ddelx_dx;
+			float dmeanY = skip ? 0.0f : dL_dG * dG_ddely * ddely_dy;
+			float dconicX = skip ? 0.0f : -0.5f * gdx * d.x * dL_dG;
+			float dconicY = skip ? 0.0f : -0.5f * gdx * d.y * dL_dG;
+			float dconicW = skip ? 0.0f : -0.5f * gdy * d.y * dL_dG;
+			float dopacity = skip ? 0.0f : G * dL_dalpha;
 
-			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
-			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
-			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
+			// DISTWAR - butterfly reduction (SW-B) can only be performed if
+			//			 all 32 threads are updating the same gaussian (global_id)
+			//			 and the number of active threads exceeds the preset balance threshold
+			if (__match_any_sync(__activemask(), global_id) == 0xFFFFFFFF && active_ct >= balance_threshold) {
 
-			// Update gradients w.r.t. opacity of the Gaussian
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+				// DISTWAR - gather the gradient updates to thread 0 with butterfly reduction
+                for (int offset = 16; offset >= 1; offset /= 2) {
+                    dmeanX += __shfl_down_sync(0xFFFFFFFF, dmeanX, offset);
+                    dmeanY += __shfl_down_sync(0xFFFFFFFF, dmeanY, offset);
+                    dconicX += __shfl_down_sync(0xFFFFFFFF, dconicX, offset);
+                    dconicY += __shfl_down_sync(0xFFFFFFFF, dconicY, offset);
+                    dconicW += __shfl_down_sync(0xFFFFFFFF, dconicW, offset);
+                    dopacity += __shfl_down_sync(0xFFFFFFFF, dopacity, offset);
+					dcolors[0] += __shfl_down_sync(0xFFFFFFFF, dcolors[0], offset);
+					dcolors[1] += __shfl_down_sync(0xFFFFFFFF, dcolors[1], offset);
+					dcolors[2] += __shfl_down_sync(0xFFFFFFFF, dcolors[2], offset);
+                }
+
+				// DISTWAR - thread 0 sends the reduced gradient updates with atomicAdd
+                if (laneId == 0) {
+                    atomicAdd(&(dL_dmean2D[global_id].x), dmeanX);
+                    atomicAdd(&(dL_dmean2D[global_id].y), dmeanY);
+                    atomicAdd(&(dL_dconic2D[global_id].x), dconicX);
+                    atomicAdd(&(dL_dconic2D[global_id].y), dconicY);
+                    atomicAdd(&(dL_dconic2D[global_id].w), dconicW);
+                    atomicAdd(&(dL_dopacity[global_id]), dopacity);
+					atomicAdd(&(dL_dcolors[global_id * C + 0]), dcolors[0]);
+					atomicAdd(&(dL_dcolors[global_id * C + 1]), dcolors[1]);
+					atomicAdd(&(dL_dcolors[global_id * C + 2]), dcolors[2]);
+                }
+            } else if (!skip) {		// DISTWAR - SW-B condition not met, update gradients normally
+                atomicAdd(&(dL_dmean2D[global_id].x), dmeanX);
+                atomicAdd(&(dL_dmean2D[global_id].y), dmeanY);
+                atomicAdd(&(dL_dconic2D[global_id].x), dconicX);
+                atomicAdd(&(dL_dconic2D[global_id].y), dconicY);
+                atomicAdd(&(dL_dconic2D[global_id].w), dconicW);
+                atomicAdd(&(dL_dopacity[global_id]), dopacity);
+				atomicAdd(&(dL_dcolors[global_id * C + 0]), dcolors[0]);
+				atomicAdd(&(dL_dcolors[global_id * C + 1]), dcolors[1]);
+				atomicAdd(&(dL_dcolors[global_id * C + 2]), dcolors[2]);
+            }
 		}
 	}
 }
