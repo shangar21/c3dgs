@@ -74,14 +74,19 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
 
             scene.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            if iteration > 250 and iteration % 100 == 0:
-                size_threshold = 20 if iteration > 300 else None
-                scene.gaussians.densify_and_prune(0.0002, 0.005, scene.cameras_extent, size_threshold)
-            
-            if iteration % 300 == 0:
-                scene.gaussians.reset_opacity()
+            # Densification
+            if iteration < opt.densify_until_iter:
+                # Keep track of max radii in image-space for pruning
+                scene.gaussians.max_radii2D[visibility_filter] = torch.max(scene.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                scene.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            # Optimizer step
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    scene.gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    scene.gaussians.reset_opacity()            # Optimizer step
+
             if iteration < max_iter:
                 scene.gaussians.optimizer.step()
                 scene.gaussians.optimizer.zero_grad()

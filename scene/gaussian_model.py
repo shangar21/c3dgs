@@ -890,13 +890,12 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-        self._scaling_factors = optimizable_tensors["scaling_factor"]
+        self._scaling_factor = optimizable_tensors["scaling_factor"]
         self._rotation = optimizable_tensors["rotation"]
         self._gaussian_indices = self._gaussian_indices[valid_points_mask]
         self._feature_indices = self._feature_indices[valid_points_mask] 
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
-
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
@@ -991,17 +990,6 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
-        d = {"xyz": self._xyz,
-        "opacity": self._opacity,
-        "f_dc": self._features_dc,
-        "f_rest": self._features_rest,
-        "scaling": self._scaling,
-        "scaling_factor": self._scaling_factor,
-        "rotation": self._rotation}
-
-        for i in d:
-            self.replace_tensor_to_optimizer(d[i], i)
-
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
@@ -1013,6 +1001,58 @@ class GaussianModel:
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def ensure_gradients_aligned(self):
+        """
+        Ensures that all tensors in the model and their corresponding gradients are aligned in shape.
+        If a mismatch is found, the gradients are reset.
+        """
+
+        named_parameters = {
+            "xyz": self._xyz,
+            "opacity": self._opacity,
+            "f_dc": self._features_dc,
+            "f_rest": self._features_rest,
+            "scaling": self._scaling,
+            "scaling_factor": self._scaling_factor,
+            "rotation": self._rotation,
+        }
+
+        # Step 1: Check alignment using the param_map
+        for name, param in named_parameters.items():
+            if param.grad is not None:
+                # Check if the gradient's shape matches the parameter's shape
+                if param.grad.shape != param.shape:
+                    print(f"Mismatch found for parameter '{name}': resetting gradients.")
+                    # Reset the gradient to match the parameter shape
+                    param.grad = torch.zeros_like(param)
+
+        # Step 2: Cross-check alignment with optimizer.param_groups
+        for group in self.optimizer.param_groups:
+            for param in group['params']:
+                if param.grad is not None:
+                    # Check if the gradient's shape matches the parameter's shape
+                    if param.grad.shape != param.shape:
+                        print(f"Mismatch found for optimizer parameter: resetting gradients.")
+                        # Reset the gradient to match the parameter shape
+                        param.grad = torch.zeros_like(param)
+
+                # Ensure the optimizer's state is consistent with the parameters
+                if param in self.optimizer.state:
+                    state = self.optimizer.state[param]
+
+                    # Reinitialize state tensors if they don't match the current parameter shape
+                    if 'exp_avg' in state and state['exp_avg'].shape != param.shape:
+                        print(f"Reinitializing exp_avg for optimizer parameter.")
+                        state['exp_avg'] = torch.zeros_like(param)
+
+                    if 'exp_avg_sq' in state and state['exp_avg_sq'].shape != param.shape:
+                        print(f"Reinitializing exp_avg_sq for optimizer parameter.")
+                        state['exp_avg_sq'] = torch.zeros_like(param)
+
+        print("All gradients and model tensors are aligned with two-fold insurance.")
+
+
 
 
 class FakeQuantizationHalf(torch.autograd.Function):

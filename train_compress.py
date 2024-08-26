@@ -205,7 +205,7 @@ if __name__ == "__main__":
     gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
     torch.cuda.nvtx.range_pop()
 
-    comp_params.finetune_iterations = 3000
+    comp_params.finetune_iterations = 30000
     scene.loaded_iter = 0
 
     torch.cuda.nvtx.range_push("finetune")
