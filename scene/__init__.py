@@ -27,6 +27,7 @@ class Scene:
         self,
         args: ModelParams,
         gaussians: GaussianModel,
+        random_init=False,
         load_iteration=None,
         shuffle=True,
         resolution_scales=[1.0],
@@ -53,7 +54,7 @@ class Scene:
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](
-                args.source_path, args.images, args.eval
+                args.source_path, args.images, args.eval, random_init=random_init
             )
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")

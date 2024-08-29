@@ -87,7 +87,7 @@ def calc_importance(
 
 def initialize_gaussians(model_params, comp_params):
     gaussians = GaussianModel(model_params.sh_degree if model_params.sh_degree else 3, quantization=True)
-    scene = Scene(model_params, gaussians, load_iteration="", shuffle=True)
+    scene = Scene(model_params, gaussians, random_init=True, load_iteration="", shuffle=True)
     return gaussians, scene
 
 def initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params):
@@ -97,7 +97,7 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
         color_importance_n = color_importance.amax(-1)
         gaussian_importance_n = gaussian_sensitivity.amax(-1)
         torch.cuda.empty_cache()
-
+        
         color_compression_settings = CompressionSettings(
             codebook_size=comp_params.color_codebook_size,
             importance_prune=comp_params.color_importance_prune,
@@ -133,7 +133,7 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
     os.makedirs(comp_params.output_vq, exist_ok=True)
 
     model_params.model_path = comp_params.output_vq
-
+    
     return gaussians, scene
 
 def render_and_eval(
