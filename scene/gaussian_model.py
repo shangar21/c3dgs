@@ -21,6 +21,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from enum import Enum
+from diff_idx import DifferentiableIndexing 
 
 
 class ColorMode(Enum):
@@ -798,6 +799,7 @@ class GaussianModel:
 
     def set_color_indexed(self, features: torch.Tensor, indices: torch.Tensor):
         self._feature_indices = nn.Parameter(indices, requires_grad=False)
+        self._feature_indices_mlp = DifferentiableIndexing(1, features.shape[0])
         self._features_dc = nn.Parameter(features[:, :1].detach(), requires_grad=True)
         self._features_rest = nn.Parameter(features[:, 1:].detach(), requires_grad=True)
         self.color_index_mode = ColorMode.ALL_INDEXED
@@ -806,6 +808,7 @@ class GaussianModel:
         self, rotation: torch.Tensor, scaling: torch.Tensor, indices: torch.Tensor
     ):
         self._gaussian_indices = nn.Parameter(indices.detach(), requires_grad=False)
+        self._gaussian_indices_mlp = DifferentiableIndexing(1, scaling.shape[0]) 
         self._rotation = nn.Parameter(rotation.detach(), requires_grad=True)
         self._scaling = nn.Parameter(scaling.detach(), requires_grad=True)
 

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DifferentiableIndexing(nn.Module):
-    def __init__(self, input_size, codebook_size, hidden_size=64, temperature=1.0):
+    def __init__(self, input_size, codebook_size, hidden_size=64, temperature=10.0):
         """
         Initializes the DifferentiableIndexing module.
         
