@@ -136,6 +136,9 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
 
     return gaussians, scene
 
+#def initialize_diff_indexing(scene, gaussians):
+#    gaussian_index_model = gaussians._gaussian_indices_mlp()
+
 def render_and_eval(
     gaussians: GaussianModel,
     scene: Scene,

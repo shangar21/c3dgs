@@ -97,9 +97,10 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     N = 300_000
     k = N // 10
+
     indices = torch.arange(N).cuda()
     gt = torch.randint(0, k, indices.shape).cuda()
-    model = DifferentiableIndexing(N, k, hidden_size = 64).cuda()
+    model = DifferentiableIndexing(N, k, hidden_size = 16).cuda()
     
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     loss = nn.CrossEntropyLoss()

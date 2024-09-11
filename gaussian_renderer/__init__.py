@@ -82,7 +82,7 @@ def render(
         rotations = pc._rotation_post_activation
 
         _, pc._feature_indices = pc._feature_indices_mlp(torch.arange(start = 0, end = pc._feature_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
-        _, pc._gaussian_indices = pc._feature_indices_mlp(torch.arange(start = 0, end = pc._feature_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
+        _, pc._gaussian_indices = pc._gaussian_indices_mlp(torch.arange(start = 0, end = pc._gaussian_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(
