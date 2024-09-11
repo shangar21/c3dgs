@@ -2,6 +2,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class IndexDataset(torch.utils.data.Dataset):
+    def __init__(self, indices, gt_indices):
+        self.indices = indices.cuda()
+        self.gt_indices = gt_indices.cuda()
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        return self.indices[idx], self.gt_indices[idx]
+
 class DifferentiableIndexing(nn.Module):
     def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=1.0):
         """
@@ -57,6 +68,7 @@ class DifferentiableIndexing(nn.Module):
             codebook_indices = gumbel_softmax_out.argmax(dim=-1)
         else:
             # Apply Gumbel-Softmax on the full logits
+            print(logits.shape)
             gumbel_softmax_out = F.gumbel_softmax(logits, tau=self.temperature, hard=True, dim=-1)
             codebook_indices = gumbel_softmax_out.argmax(dim=-1)  # Shape: (chunk_size,)
 
@@ -100,9 +112,11 @@ if __name__ == "__main__":
 
     indices = torch.arange(N).cuda()
     gt = torch.randint(0, k, indices.shape).cuda()
-    model = DifferentiableIndexing(N, k, hidden_size = 16).cuda()
+    model = DifferentiableIndexing(1, k).cuda()
+    dataset = IndexDataset(indices, gt)
+    train_loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     loss = nn.CrossEntropyLoss()
 
     n_epochs = 1000
@@ -113,14 +127,14 @@ if __name__ == "__main__":
 
     for epoch in progress_bar:
         model.train()
-        logits, out = model(indices, use_chunking=True, use_topk=True)
-        l = loss(logits, gt)
-        optimizer.zero_grad()
-        l.backward()
-        optimizer.step()
-
-        progress_bar.set_postfix({"Loss": l.item()})
-        losses.append(l.item())
+        for index, gt_index in train_loader:
+            logits, out = model(index)
+            l = loss(index, gt_index)
+            optimizer.zero_grad()
+            l.backward()
+            optimizer.step()
+            progress_bar.set_postfix({"Loss": l.item()})
+            losses.append(l.item())
 
     plt.plot(list(range(len(losses))), losses)
     plt.savefig('plot.png')
