@@ -21,14 +21,14 @@ class DifferentiableIndexing(nn.Module):
         self.embedding = nn.Embedding(num_gaussians, hidden_size)
         
         # Fully connected layer to output logits for the codebook indices
-        #self.fc = nn.Sequential(
-        #    nn.Linear(hidden_size, hidden_size * 2),
-        #    nn.ReLU(),  # Activation function
-        #    nn.Linear(hidden_size * 2, hidden_size * 2),
-        #    nn.ReLU(),  # Activation function
-        #    nn.Linear(hidden_size * 2, codebook_size)  # Final layer to match codebook size
-        #)
-        self.fc = nn.Linear(hidden_size, codebook_size)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 2),
+            nn.ReLU(),  # Activation function
+            nn.Linear(hidden_size * 2, hidden_size * 2),
+            nn.ReLU(),  # Activation function
+            nn.Linear(hidden_size * 2, codebook_size)  # Final layer to match codebook size
+        )
+        #self.fc = nn.Linear(hidden_size, codebook_size)
 
     def _process_chunk(self, gaussian_indices, use_topk, top_k):
         """
