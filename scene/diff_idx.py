@@ -21,6 +21,13 @@ class DifferentiableIndexing(nn.Module):
         self.embedding = nn.Embedding(num_gaussians, hidden_size)
         
         # Fully connected layer to output logits for the codebook indices
+        #self.fc = nn.Sequential(
+        #    nn.Linear(hidden_size, hidden_size * 2),
+        #    nn.ReLU(),  # Activation function
+        #    nn.Linear(hidden_size * 2, hidden_size * 2),
+        #    nn.ReLU(),  # Activation function
+        #    nn.Linear(hidden_size * 2, codebook_size)  # Final layer to match codebook size
+        #)
         self.fc = nn.Linear(hidden_size, codebook_size)
 
     def _process_chunk(self, gaussian_indices, use_topk, top_k):
@@ -53,7 +60,7 @@ class DifferentiableIndexing(nn.Module):
             gumbel_softmax_out = F.gumbel_softmax(logits, tau=self.temperature, hard=True, dim=-1)
             codebook_indices = gumbel_softmax_out.argmax(dim=-1)  # Shape: (chunk_size,)
 
-        return codebook_indices 
+        return logits, codebook_indices 
 
     def forward(self, gaussian_indices, use_chunking=False, chunk_size=1000, use_topk=False, top_k=100):
         """
@@ -71,20 +78,48 @@ class DifferentiableIndexing(nn.Module):
         """
         if use_chunking:
             outputs = []
+            logits = []
             # Process input in chunks
             for i in range(0, len(gaussian_indices), chunk_size):
                 chunk = gaussian_indices[i:i+chunk_size]
-                outputs.append(self._process_chunk(chunk, use_topk, top_k))
-            return torch.cat(outputs, dim=0)  # Concatenate chunks along batch dimension
+                lgts, codebook_indices = self._process_chunk(chunk, use_topk, top_k)
+                outputs.append(codebook_indices)
+                logits.append(lgts)
+            return torch.cat(logits, dim=0), torch.cat(outputs, dim=0)  # Concatenate chunks along batch dimension
         else:
             # Process all at once
             return self._process_chunk(gaussian_indices, use_topk, top_k)
 
 
 if __name__ == "__main__":
-    indices = torch.arange(100_000).cuda()
-    model = DifferentiableIndexing(100_000, 10_000).cuda()
+    from tqdm import tqdm
+    import json
+    import matplotlib.pyplot as plt
+    N = 300_000
+    k = N // 10
+    indices = torch.arange(N).cuda()
+    gt = torch.randint(0, k, indices.shape).cuda()
+    model = DifferentiableIndexing(N, k, hidden_size = 64).cuda()
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    loss = nn.CrossEntropyLoss()
 
-    output = model(indices, use_topk=True)
+    n_epochs = 1000
 
-    print(output)
+    progress_bar = tqdm(range(n_epochs))
+
+    losses = []
+
+    for epoch in progress_bar:
+        model.train()
+        logits, out = model(indices, use_chunking=True, use_topk=True)
+        l = loss(logits, gt)
+        optimizer.zero_grad()
+        l.backward()
+        optimizer.step()
+
+        progress_bar.set_postfix({"Loss": l.item()})
+        losses.append(l.item())
+
+    plt.plot(list(range(len(losses))), losses)
+    plt.savefig('plot.png')

@@ -8,6 +8,7 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import  Namespace
+import json
 
 def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from):
     prepare_output_and_logger(comp.output_vq, dataset)
@@ -28,6 +29,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, max_iter), desc="Training progress")
     first_iter += 1
+    psnr_track = []
     for iteration in range(first_iter, max_iter + 1):
         iter_start.record()
 
@@ -53,7 +55,12 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (
             1.0 - ssim(image, gt_image)
         )
+        
         loss.backward()
+
+        tmp = psnr(image, gt_image).mean().item()
+        psnr_track.append(tmp)
+        json.dump(psnr_track, open("diff_idx_psnr.json", 'w+'))
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)
@@ -62,7 +69,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", 'PSNR': tmp})
                 progress_bar.update(10)
             if iteration == max_iter:
                 progress_bar.close()

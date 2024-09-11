@@ -81,16 +81,16 @@ def render(
         scale_factors = pc.get_scaling_factor
         rotations = pc._rotation_post_activation
 
-        feature_indices = pc._feature_indices_mlp(torch.arange(start = 0, end = pc._feature_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
-        gaussian_indices = pc._feature_indices_mlp(torch.arange(start = 0, end = pc._feature_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
+        _, pc._feature_indices = pc._feature_indices_mlp(torch.arange(start = 0, end = pc._feature_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
+        _, pc._gaussian_indices = pc._feature_indices_mlp(torch.arange(start = 0, end = pc._feature_indices.shape[0]).cuda(), use_topk=True, use_chunking=True)
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(
             means3D=means3D,
             means2D=means2D,
             shs=shs,
-            sh_indices=feature_indices,
-            g_indices=gaussian_indices,
+            sh_indices=pc._feature_indices,
+            g_indices=pc._gaussian_indices,
             colors_precomp=None,
             opacities=opacity,
             scales=scales,

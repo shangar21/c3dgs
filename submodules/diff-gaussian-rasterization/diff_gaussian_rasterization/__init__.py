@@ -436,17 +436,17 @@ class _RasterizeGaussiansIndexed(torch.autograd.Function):
             ) = _C.rasterize_gaussians_backward_indexed(*args)
 
         grads = (
-            grad_means3D,
-            grad_means2D,
-            grad_sh,
+            0.0 * grad_means3D,
+            0.0 * grad_means2D,
+            0.0 * grad_sh,
             None,
             None,
-            grad_colors_precomp,
-            grad_opacities,
-            grad_scales,
-            grad_scale_factors,
-            grad_rotations,
-            grad_cov3Ds_precomp,
+            0.0 * grad_colors_precomp,
+            0.0 * grad_opacities,
+            0.0 * grad_scales,
+            0.0 * grad_scale_factors,
+            0.0 * grad_rotations,
+            0.0 * grad_cov3Ds_precomp,
             None,
         )
 
