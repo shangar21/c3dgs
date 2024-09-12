@@ -38,6 +38,7 @@ from scene import Scene
 from finetune import finetune
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
+import scene.diff_idx as diff_idx
 
 def calc_importance(
     gaussians: GaussianModel, scene, pipeline_params
@@ -136,8 +137,15 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
 
     return gaussians, scene
 
-#def initialize_diff_indexing(scene, gaussians):
-#    gaussian_index_model = gaussians._gaussian_indices_mlp()
+def initialize_diff_indexing(scene, gaussians):
+    gaussian_indices = gaussians._gaussian_indices
+    feature_indices = gaussians._feature_indices
+
+    diff_idx.initial_train(gaussians._gaussian_indices_mlp, gaussian_indices)
+    diff_idx.initial_train(gaussians._feature_indices_mlp, feature_indices, n_epochs=100)
+
+    # test feature indices
+    out = diff_idx.model_inference(gaussians._feature_indices_mlp, gaussians._feature_indices)
 
 def render_and_eval(
     gaussians: GaussianModel,
@@ -204,14 +212,12 @@ if __name__ == "__main__":
         model_params.sh_degree = 3
 
     gaussians, scene = initialize_gaussians(model_params, comp_params)
-    torch.cuda.nvtx.range_push("compress")
     gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
-    torch.cuda.nvtx.range_pop()
+    initialize_diff_indexing(scene, gaussians)
 
     comp_params.finetune_iterations = 3_000
     scene.loaded_iter = 0
 
-    torch.cuda.nvtx.range_push("finetune")
     finetune(
         scene,
         model_params,
@@ -221,7 +227,6 @@ if __name__ == "__main__":
         testing_iterations=[-1],
         debug_from = -1
     )
-    torch.cuda.nvtx.range_pop()
 
     iteration = comp_params.finetune_iterations
     out_file = path.join(

@@ -30,6 +30,9 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
     progress_bar = tqdm(range(first_iter, max_iter), desc="Training progress")
     first_iter += 1
     psnr_track = []
+    loss_track = []
+    count = 0
+    use_mlp = False
     for iteration in range(first_iter, max_iter + 1):
         iter_start.record()
 
@@ -41,7 +44,15 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+
+        if count == 100 or use_mlp:
+            count -= 1
+            use_mlp = count > 0
+            render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background, use_mlp=use_mlp)
+        else:
+            count += 1
+            render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"],
             render_pkg["viewspace_points"],
@@ -61,6 +72,8 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         tmp = psnr(image, gt_image).mean().item()
         psnr_track.append(tmp)
         json.dump(psnr_track, open("diff_idx_psnr.json", 'w+'))
+        loss_track.append(loss.item())
+        json.dump(loss_track, open("diff_idx_loss.json", 'w+'))
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)
