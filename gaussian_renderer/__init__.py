@@ -83,19 +83,16 @@ def render(
         rotations = pc._rotation_post_activation
 
         if use_mlp:
-            feature_indices = model_inference(pc._feature_indices_mlp, torch.arange(start = 0, end = pc._feature_indices.shape[0]))
-            gaussian_indices = model_inference(pc._gaussian_indices_mlp, torch.arange(start = 0, end = pc._gaussian_indices.shape[0]))
-        else:
-            feature_indices = None
-            gaussian_indices = None
+            pc._feature_indices = model_inference(pc._feature_indices_mlp, torch.arange(start = 0, end = pc._feature_indices.shape[0]))
+            pc._gaussian_indices = model_inference(pc._gaussian_indices_mlp, torch.arange(start = 0, end = pc._gaussian_indices.shape[0]))
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(
             means3D=means3D,
             means2D=means2D,
             shs=shs,
-            sh_indices=pc._feature_indices if not use_mlp else feature_indices,
-            g_indices=pc._gaussian_indices if not use_mlp else gaussian_indices,
+            sh_indices=pc._feature_indices,
+            g_indices=pc._gaussian_indices,
             colors_precomp=None,
             opacities=opacity,
             scales=scales,

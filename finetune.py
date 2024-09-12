@@ -66,7 +66,22 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (
             1.0 - ssim(image, gt_image)
         )
-        
+
+        #if use_mlp:
+        #    # Disable gradients for all parameters
+        #    for name, param in scene.gaussians.named_parameters():
+        #        param.requires_grad = False
+        #    
+        #    # Enable gradients only for specific submodule (e.g., DifferentiableIndexing MLP)
+        #    for name, module in scene.gaussians.named_modules():
+        #        if 'mlp' in name:
+        #            for pname, param in module.named_parameters():
+        #                param.requires_grad = True
+        #else:
+        #    # Disable gradients for all parameters
+        #    for name, param in scene.gaussians.named_parameters():
+        #        param.requires_grad = False        
+
         loss.backward()
 
         tmp = psnr(image, gt_image).mean().item()
