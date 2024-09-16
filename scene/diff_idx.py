@@ -4,8 +4,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import pdb
 
-class DifferentiableIndexing(nn.Module):
-    def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.0):
+def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.0):
         """
         Initializes the DifferentiableIndexing module.
 
@@ -13,7 +12,7 @@ class DifferentiableIndexing(nn.Module):
             num_gaussians (int): Number of possible input indices (0 to N).
             codebook_size (int): Number of possible codebook indices (0 to K).
             hidden_size (int): Size of the hidden layer in the MLP.
-            temperature (float): Temperature for the Gumbel-Softmax.
+            temperature (float): Initial temperature for the Gumbel-Softmax.
         """
         super(DifferentiableIndexing, self).__init__()
         self.temperature = temperature
@@ -22,21 +21,36 @@ class DifferentiableIndexing(nn.Module):
         # Embedding layer to map Gaussian indices to hidden vectors
         self.embedding = nn.Embedding(num_gaussians, hidden_size)
         
-        # Fully connected layer to output logits for the codebook indices
+        # Layer normalization after embedding
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        
+        # Fully connected layers for outputting logits for the codebook indices
         self.fc = nn.Sequential(
             nn.Linear(hidden_size, hidden_size * 2),
-            nn.ReLU(),  # Activation function
+            nn.GELU(),  # Changed activation function to GELU
             nn.Linear(hidden_size * 2, hidden_size * 2),
-            nn.ReLU(),  # Activation function
+            nn.GELU(),  # Changed activation function to GELU
             nn.Linear(hidden_size * 2, codebook_size)  # Final layer to match codebook size
         )
+            # Apply Xavier initialization to the linear layers
+        self._initialize_weights()
 
-    def forward(self, gaussian_indices):
+    def _initialize_weights(self):
+        """Initialize weights using Xavier uniform initialization."""
+        for layer in self.fc:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
+
+    def forward(self, gaussian_indices, anneal_factor=None):
         """
         Forward pass of the DifferentiableIndexing module.
 
         Args:
             gaussian_indices (Tensor): Input tensor of Gaussian indices of shape (batch_size,).
+            anneal_factor (float, optional): Factor to adjust the temperature during annealing.
 
         Returns:
             logits (Tensor): Output logits of shape (batch_size, codebook_size).
@@ -44,14 +58,19 @@ class DifferentiableIndexing(nn.Module):
         """
         # Embed the Gaussian indices to hidden vectors
         embedded = self.embedding(gaussian_indices)  # Shape: (batch_size, hidden_size)
-
+        embedded = self.layer_norm(embedded)  # Normalize embeddings
+        
         # Pass through the fully connected layers to get logits for the codebook indices
         logits = self.fc(embedded)  # Shape: (batch_size, codebook_size)
 
-        # Apply argmax to get the codebook indices
-        codebook_indices = logits.argmax(dim=-1)  # Shape: (batch_size,)
+        # Apply Gumbel-Softmax for differentiable indexing
+        if anneal_factor is not None:
+            self.temperature *= anneal_factor  # Update temperature with annealing factor
 
-        return logits, codebook_indices
+        # Gumbel-Softmax trick for differentiable sampling
+        codebook_indices = F.gumbel_softmax(logits, tau=self.temperature, hard=True, dim=-1)
+
+        return logits, codebook_indices.argmax(dim=-1)  # Return the indices for hard assignment
 
 class IndexDataset(torch.utils.data.Dataset):
     def __init__(self, indices, gt_indices):
