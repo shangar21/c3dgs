@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 import pdb
-
-def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.0):
+class DifferentiableIndexing(nn.Module):
+    def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.0):
         """
         Initializes the DifferentiableIndexing module.
 
