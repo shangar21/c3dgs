@@ -36,6 +36,8 @@ class Scene:
         :param path: Path to colmap scene main folder.
         """
         self.model_path = args.model_path
+        self.model_name = args.model_path.split('/')[-1]
+        print("MODEL NAME: ", self.model_name)
         self.loaded_iter = None
         self.gaussians = gaussians
 

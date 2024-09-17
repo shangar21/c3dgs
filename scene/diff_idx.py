@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import pdb
 
-def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.0):
+class DifferentiableIndexing(nn.Module):
+    def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.0):
         """
         Initializes the DifferentiableIndexing module.
 
@@ -36,7 +37,6 @@ def __init__(self, num_gaussians, codebook_size, hidden_size=64, temperature=10.
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """Initialize weights using Xavier uniform initialization."""
         for layer in self.fc:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)

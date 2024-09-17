@@ -29,7 +29,7 @@ class ColorMode(Enum):
     ALL_INDEXED = 1
 
 
-class GaussianModel:
+class GaussianModel(nn.Module):
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(
             scaling, scaling_modifier, rotation, strip_sym=True
@@ -56,6 +56,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
     def __init__(self, sh_degree: int, quantization=True):
+        super(GaussianModel, self).__init__()
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -798,8 +799,9 @@ class GaussianModel:
                 self._rotation = nn.Parameter(self._rotation[mask], requires_grad=True)
 
     def set_color_indexed(self, features: torch.Tensor, indices: torch.Tensor):
-        self._feature_indices = nn.Parameter(indices, requires_grad=False)
+        self._feature_indices = torch.Tensor(indices).cuda()
         self._feature_indices_mlp = DifferentiableIndexing(indices.shape[0], features.shape[0]).cuda()
+        self._feature_indices_mlp = torch.compile(self._feature_indices_mlp)
         self._features_dc = nn.Parameter(features[:, :1].detach(), requires_grad=True)
         self._features_rest = nn.Parameter(features[:, 1:].detach(), requires_grad=True)
         self.color_index_mode = ColorMode.ALL_INDEXED
@@ -807,8 +809,9 @@ class GaussianModel:
     def set_gaussian_indexed(
         self, rotation: torch.Tensor, scaling: torch.Tensor, indices: torch.Tensor
     ):
-        self._gaussian_indices = nn.Parameter(indices.detach(), requires_grad=False)
+        self._gaussian_indices = torch.Tensor(indices.detach()).cuda()
         self._gaussian_indices_mlp = DifferentiableIndexing(indices.shape[0], scaling.shape[0]).cuda() 
+        self._gaussian_indices_mlp = torch.compile(self._gaussian_indices_mlp)
         self._rotation = nn.Parameter(rotation.detach(), requires_grad=True)
         self._scaling = nn.Parameter(scaling.detach(), requires_grad=True)
 

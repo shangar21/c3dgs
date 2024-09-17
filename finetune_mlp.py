@@ -9,10 +9,11 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import  Namespace
 import json
+import torchvision
 
-def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from):
+def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from, use_mlp_every=100):
     prepare_output_and_logger(comp.output_vq, dataset)
-
+    
     first_iter = scene.loaded_iter
     max_iter = first_iter + comp.finetune_iterations
 
@@ -32,7 +33,9 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
     psnr_track = []
     loss_track = []
     ssim_track = []
-
+    count = 0
+    use_mlp = False
+    
     for iteration in range(first_iter, max_iter + 1):
         iter_start.record()
 
@@ -44,7 +47,15 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+
+        if count == use_mlp_every or use_mlp:
+            count -= 1
+            use_mlp = count > 0
+            render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background, use_mlp=use_mlp)
+        else:
+            count += 1
+            render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"],
             render_pkg["viewspace_points"],
@@ -58,6 +69,24 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (
             1.0 - ssim(image, gt_image)
         )
+
+        if use_mlp:
+            # Disable gradients for all parameters
+            for name, param in scene.gaussians.named_parameters():
+                param.requires_grad = False
+            
+            # Enable gradients only for specific submodule (e.g., DifferentiableIndexing MLP)
+            for name, module in scene.gaussians.named_modules():
+                if 'mlp' in name:
+                    for pname, param in module.named_parameters():
+                        param.requires_grad = True
+        else:
+            for name, param in scene.gaussians.named_parameters():
+                if 'mlp' not in name:
+                    param.requires_grad = True    
+                else:
+                    param.requires_grad = False
+
         loss.backward()
 
         tmp = psnr(image, gt_image).mean().item()
@@ -67,6 +96,10 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
         ssim_track.append(ssim(image, gt_image).mean().item())
         json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
+        if iteration % 100 == 0:
+            torchvision.utils.save_image(gt_image, f"renders/{scene.model_name}/training/gt_{iteration}.png")
+            torchvision.utils.save_image(image, f"renders/{scene.model_name}/training/render_{iteration}.png")
+
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)
@@ -75,7 +108,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", 'PSNR': tmp})
                 progress_bar.update(10)
             if iteration == max_iter:
                 progress_bar.close()
