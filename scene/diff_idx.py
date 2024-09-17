@@ -28,12 +28,12 @@ class DifferentiableIndexing(nn.Module):
         # Fully connected layers for outputting logits for the codebook indices
         self.fc = nn.Sequential(
             nn.Linear(hidden_size, hidden_size * 2),
-            nn.GELU(),  # Changed activation function to GELU
+            nn.GELU(),
             nn.Linear(hidden_size * 2, hidden_size * 2),
-            nn.GELU(),  # Changed activation function to GELU
+            nn.GELU(), 
             nn.Linear(hidden_size * 2, codebook_size)  # Final layer to match codebook size
         )
-            # Apply Xavier initialization to the linear layers
+        # Apply Xavier initialization to the linear layers
         self._initialize_weights()
 
     def _initialize_weights(self):
