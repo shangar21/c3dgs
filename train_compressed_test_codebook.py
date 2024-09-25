@@ -242,6 +242,7 @@ if __name__ == "__main__":
         scene.loaded_iter = 0
 
         if not args.no_mlp:
+            print("Not using MLP")
             finetune_no_mlp(
                 scene,
                 model_params,

@@ -1,14 +1,35 @@
 import os
+import gc
 import torch
 from random import randint
 from utils.loss_utils import l1_loss,  ssim
 from gaussian_renderer import render
-from scene import Scene
+from scene import Scene, GaussianModel
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import  Namespace
 import json
+from arguments import ModelParams, PipelineParams
+
+def accumulate_gradients(grad_storage, model):
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            if name not in grad_storage:
+                grad_storage[name] = {'gradients': []}
+            grad_storage[name]['gradients'].append(param.grad.abs().clone().detach())
+
+def calculate_statistics(grad_storage):
+    gradients_mean = {}
+    gradients_median = {}
+
+    for name, data in grad_storage.items():
+        stacked_grads = torch.stack(data['gradients'])
+        gradients_mean[name] = stacked_grads.mean(dim=0).mean().item()
+        gradients_median[name] = stacked_grads.median(dim=0).values.median().item()
+
+    return gradients_mean, gradients_median
+
 
 def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from):
     prepare_output_and_logger(comp.output_vq, dataset)
@@ -32,6 +53,9 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
     psnr_track = []
     loss_track = []
     ssim_track = []
+    grad_storage = {}
+    log_interval = 200
+    gradients_log = []
 
     for iteration in range(first_iter, max_iter + 1):
         iter_start.record()
@@ -44,7 +68,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+        render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background, use_mlp=False)
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"],
             render_pkg["viewspace_points"],
@@ -60,13 +84,41 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         )
         loss.backward()
 
-        tmp = psnr(image, gt_image).mean().item()
-        psnr_track.append(tmp)
-        json.dump(psnr_track, open(f"./output/{scene.model_name}/diff_idx_psnr.json", 'w+'))
-        loss_track.append(loss.item())
-        json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
-        ssim_track.append(ssim(image, gt_image).mean().item())
-        json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
+        accumulate_gradients(grad_storage, scene.gaussians)
+
+        if iteration % log_interval == 0:
+            gradients_mean, gradients_median = calculate_statistics(grad_storage)
+            gradients_log.append({
+                'iteration': iteration,
+                'gradients_mean': gradients_mean,
+                'gradients_median': gradients_median
+            })
+            grad_storage.clear()
+            json.dump(gradients_log, open(f"./output/{scene.model_name}/gradient_log.json", 'w+'))
+
+        if iteration == first_iter or iteration % 5 == 0 or True:
+            eval_results = {}
+            
+            test_psnrs = []
+            test_losses = []
+            test_ssims = []
+            for tc in scene.getTestCameras():
+                t_img = render(tc, scene.gaussians, pipe, background, use_mlp=False)["render"]
+                test_psnrs.append(psnr(t_img, tc.original_image).mean().item())
+                test_ssims.append(ssim(t_img, tc.original_image).mean().item())
+                ll1_test = l1_loss(t_img, tc.original_image)
+                loss_test = (1.0 - opt.lambda_dssim) * ll1_test + opt.lambda_dssim * (1.0 - ssim(t_img, tc.original_image))
+                test_losses.append(loss_test.item())
+            eval_results['PSNR'] = sum(test_psnrs) / len(test_psnrs)
+            eval_results['LOSS'] = sum(test_losses) / len(test_losses)
+            eval_results['SSIM'] = sum(test_ssims) / len(test_ssims)
+
+            psnr_track.append(eval_results['PSNR'])
+            json.dump(psnr_track, open(f"./output/{scene.model_name}/diff_idx_psnr.json", 'w+'))
+            loss_track.append(eval_results["LOSS"])
+            json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
+            ssim_track.append(eval_results['SSIM'])
+            json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)

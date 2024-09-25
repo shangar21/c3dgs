@@ -234,7 +234,8 @@ if __name__ == "__main__":
         comp_params,
         pipeline_params,
         testing_iterations=[-1],
-        debug_from = -1
+        debug_from = -1,
+        use_mlp_every=500
     )
 
     iteration = comp_params.finetune_iterations
