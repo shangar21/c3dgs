@@ -151,8 +151,10 @@ def compress_color(
     color_importance: torch.Tensor,
     color_comp: CompressionSettings,
     color_compress_non_dir: bool,
+    in_training = False
 ):
     keep_mask = color_importance > color_comp.importance_include
+    print("COMPRESS COLOR IMPORTANCE SHAPE: ", color_importance.shape)
 
     print(
         f"color keep: {keep_mask.float().mean()*100:.2f}%"
@@ -189,7 +191,56 @@ def compress_color(
         all_features, keep_mask, color_codebook, color_vq_indices
     )
 
+    #permu = torch.randperm(indices.size(0))
+    #indices = indices[permu]
+    
+    print("Number of sh coefs: ", n_sh_coefs)
     gaussians.set_color_indexed(compressed_features.reshape(-1, n_sh_coefs, 3), indices)
+
+#def compress_covariance(
+#    gaussians: GaussianModel,
+#    gaussian_importance: torch.Tensor,
+#    gaussian_comp: CompressionSettings,
+#):
+#
+#    keep_mask_g = gaussian_importance > gaussian_comp.importance_include
+#
+#    vq_mask_g = ~keep_mask_g
+#
+#    print(f"gaussians keep: {keep_mask_g.float().mean()*100:.2f}%")
+#
+#    covariance = gaussians.get_normalized_covariance(strip_sym=True).detach()
+#
+#    if vq_mask_g.any():
+#        print("compressing gaussian splats...")
+#        cov_codebook, cov_vq_indices = vq_features(
+#            covariance[vq_mask_g],
+#            gaussian_importance[vq_mask_g],
+#            gaussian_comp.codebook_size,
+#            gaussian_comp.batch_size,
+#            gaussian_comp.steps,
+#            scale_normalize=True,
+#        )
+#    else:
+#        cov_codebook = torch.empty(
+#            (0, covariance.shape[1], 1), device=covariance.device
+#        )
+#        cov_vq_indices = torch.empty((0,), device=covariance.device, dtype=torch.long)
+#
+#    compressed_cov, cov_indices = join_features(
+#        covariance,
+#        keep_mask_g,
+#        cov_codebook,
+#        cov_vq_indices,
+#    )
+#
+#    rot_vq, scale_vq = extract_rot_scale(to_full_cov(compressed_cov))
+#
+#    gaussians.set_gaussian_indexed(
+#        rot_vq.to(compressed_cov.device),
+#        scale_vq.to(compressed_cov.device),
+#        cov_indices,
+#    )
 
 def compress_covariance(
     gaussians: GaussianModel,
@@ -197,44 +248,32 @@ def compress_covariance(
     gaussian_comp: CompressionSettings,
 ):
 
+    # Identity mapping means we don't need to filter with importance
     keep_mask_g = gaussian_importance > gaussian_comp.importance_include
-
     vq_mask_g = ~keep_mask_g
 
     print(f"gaussians keep: {keep_mask_g.float().mean()*100:.2f}%")
 
+    # Get the covariance (without stripping symmetry)
     covariance = gaussians.get_normalized_covariance(strip_sym=True).detach()
 
-    if vq_mask_g.any():
-        print("compressing gaussian splats...")
-        cov_codebook, cov_vq_indices = vq_features(
-            covariance[vq_mask_g],
-            gaussian_importance[vq_mask_g],
-            gaussian_comp.codebook_size,
-            gaussian_comp.batch_size,
-            gaussian_comp.steps,
-            scale_normalize=True,
-        )
-    else:
-        cov_codebook = torch.empty(
-            (0, covariance.shape[1], 1), device=covariance.device
-        )
-        cov_vq_indices = torch.empty((0,), device=covariance.device, dtype=torch.long)
+    # We are no longer performing compression (VQ), so just retain all gaussians
+    compressed_cov = covariance
 
-    compressed_cov, cov_indices = join_features(
-        covariance,
-        keep_mask_g,
-        cov_codebook,
-        cov_vq_indices,
-    )
+    # Create an identity mapping where each Gaussian `i` maps to rotation `i` and scale `i`
+    # `cov_indices` is now a simple range of indices from 0 to number of gaussians
+    cov_indices = torch.arange(compressed_cov.shape[0], device=compressed_cov.device)
 
+    # Extract rotation and scale directly from the full covariance matrix
     rot_vq, scale_vq = extract_rot_scale(to_full_cov(compressed_cov))
 
+    # Set the indexed gaussians using identity mapping
     gaussians.set_gaussian_indexed(
         rot_vq.to(compressed_cov.device),
         scale_vq.to(compressed_cov.device),
-        cov_indices,
+        cov_indices,  # Identity mapping: index points to itself
     )
+
 
 
 def compress_gaussians(

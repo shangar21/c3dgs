@@ -21,14 +21,21 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+from utils.image_utils import psnr
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
+    print(f"RENDERING SET {name}")
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
+
+    print(gaussians.max_sh_degree)
+    print(gaussians.active_sh_degree)
+
+    psnrs = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         rendering = render(view, gaussians, pipeline, background)["render"]
@@ -39,8 +46,14 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         torchvision.utils.save_image(
             gt, os.path.join(gts_path, "{0:05d}".format(idx) + ".png")
         )
+
+        psnr_val = psnr(rendering, gt).mean().item()
+        psnrs.append(psnr_val)
+
         gc.collect()
         torch.cuda.empty_cache()
+
+    print(f"Average PSNR: {sum(psnrs)/len(psnrs)}")
 
 
 def render_sets(

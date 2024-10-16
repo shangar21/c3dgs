@@ -88,8 +88,12 @@ def calc_importance(
     return importance.detach(), cov_grad.detach()
 
 def initialize_gaussians(model_params, comp_params):
-    gaussians = GaussianModel(model_params.sh_degree if model_params.sh_degree else 3, quantization=True)
+    gaussians = GaussianModel(3, quantization=True)
     scene = Scene(model_params, gaussians, load_iteration="", shuffle=True)
+
+    gaussians._gaussian_indices = None
+    gaussians._feature_indices = None
+    
     return gaussians, scene
 
 def initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params):
@@ -135,6 +139,8 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
     os.makedirs(comp_params.output_vq, exist_ok=True)
 
     model_params.model_path = comp_params.output_vq
+
+    gaussians._gaussian_indices = None
 
     return gaussians, scene
 
@@ -203,6 +209,10 @@ if __name__ == "__main__":
 
     gaussians, scene = initialize_gaussians(model_params, comp_params)
 
+    comp_params.finetune_iterations = 2500
+    scene.loaded_iter = 0
+    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
+
     if not os.path.exists(f"renders/{scene.model_name}/"):
         os.mkdir(f"renders/{scene.model_name}/")
     if not os.path.exists(f"renders/{scene.model_name}/training"):
@@ -210,7 +220,10 @@ if __name__ == "__main__":
 
     gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
 
-    comp_params.finetune_iterations = 3_000
+    print("Gaussian indexed status: ", gaussians.is_gaussian_indexed)
+
+    comp_params.finetune_iterations = 30_000
+    #comp_params.color_codebook_size = 2**16
     scene.loaded_iter = 0
 
     finetune(
