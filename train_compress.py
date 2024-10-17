@@ -127,9 +127,7 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
             color_importance_n,
             gaussian_importance_n,
             color_compression_settings if not comp_params.not_compress_color else None,
-            gaussian_compression_settings
-            if not comp_params.not_compress_gaussians
-            else None,
+            None,
             comp_params.color_compress_non_dir,
             prune_threshold=comp_params.prune_threshold,
         )
@@ -209,7 +207,7 @@ if __name__ == "__main__":
 
     gaussians, scene = initialize_gaussians(model_params, comp_params)
 
-    comp_params.finetune_iterations = 2500
+    comp_params.finetune_iterations = 15000
     scene.loaded_iter = 0
     finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
 
@@ -224,7 +222,8 @@ if __name__ == "__main__":
 
     comp_params.finetune_iterations = 30_000
     #comp_params.color_codebook_size = 2**16
-    scene.loaded_iter = 0
+    scene.loaded_iter = 15000
+    #scene.loaded_iter = 0
 
     finetune(
         scene,
@@ -233,7 +232,8 @@ if __name__ == "__main__":
         comp_params,
         pipeline_params,
         testing_iterations=[-1],
-        debug_from = -1
+        debug_from = -1,
+        skip_densify=True
     )
 
     iteration = comp_params.finetune_iterations

@@ -44,11 +44,17 @@ def compress_in_training(scene, pipe, comp):
         )
     vq.compress_color(scene.gaussians, color_importance, color_compression_settings, comp.color_compress_non_dir)
 
-def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from):
+def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from, skip_densify = False):
     prepare_output_and_logger(comp.output_vq, dataset)
 
+    print("Scene loader iter: ", scene.loaded_iter)
+
     first_iter = scene.loaded_iter
-    max_iter = first_iter + comp.finetune_iterations
+
+    print("first iter: ", first_iter)
+    
+    #max_iter = first_iter + comp.finetune_iterations
+    max_iter = comp.finetune_iterations
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -66,6 +72,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
     psnr_track = []
     loss_track = []
     ssim_track = []
+    transparent_count_track = []
     grad_storage = {}
     log_interval = 200
     gradients_log = []
@@ -78,9 +85,10 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         iter_start.record()
 
         # Densify Gaussians every K iterations
-        if iteration % K == 0 and iteration >= 3000 and iteration <= 20_000: 
+        if iteration % K == 0 and iteration >= 3000 and iteration <= 20_000 and not skip_densify: 
             #compress_in_training(scene, pipe, comp)
-            if iteration in [3000, 6000, 9000]:
+            if iteration in [3000, 6000, 9000, 12000]:
+                scene.gaussians.prune()
                 scene.gaussians.densify(opt)
                 #scene.gaussians.reset_opacity()
             # Update learning rates and optimizer after densification
@@ -136,13 +144,13 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             eval_results['PSNR'] = sum(test_psnrs) / len(test_psnrs)
             eval_results['LOSS'] = sum(test_losses) / len(test_losses)
             eval_results['SSIM'] = sum(test_ssims) / len(test_ssims)
-
             psnr_track.append(eval_results['PSNR'])
             json.dump(psnr_track, open(f"./output/{scene.model_name}/diff_idx_psnr.json", 'w+'))
             loss_track.append(eval_results["LOSS"])
             json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
             ssim_track.append(eval_results['SSIM'])
             json.dump(ssim_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
+
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)

@@ -869,7 +869,7 @@ class GaussianModel:
         self._opacity = nn.Parameter(self._opacity, requires_grad=True)
 
     def prune(self):
-        opacity_mask = (self._opacity.squeeze() > 0.00005)
+        opacity_mask = (self._opacity.squeeze() > -9.9)
         self.mask_splats(opacity_mask)
 
     def densify(self, training_args):
