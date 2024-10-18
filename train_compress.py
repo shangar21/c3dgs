@@ -207,9 +207,9 @@ if __name__ == "__main__":
 
     gaussians, scene = initialize_gaussians(model_params, comp_params)
 
-    comp_params.finetune_iterations = 15000
-    scene.loaded_iter = 0
-    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
+#    comp_params.finetune_iterations = 15000
+#    scene.loaded_iter = 0
+#    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
 
     if not os.path.exists(f"renders/{scene.model_name}/"):
         os.mkdir(f"renders/{scene.model_name}/")
@@ -222,8 +222,8 @@ if __name__ == "__main__":
 
     comp_params.finetune_iterations = 30_000
     #comp_params.color_codebook_size = 2**16
-    scene.loaded_iter = 15000
-    #scene.loaded_iter = 0
+#    scene.loaded_iter = 15000
+    scene.loaded_iter = 0
 
     finetune(
         scene,
@@ -233,7 +233,7 @@ if __name__ == "__main__":
         pipeline_params,
         testing_iterations=[-1],
         debug_from = -1,
-        skip_densify=True
+        skip_densify=False
     )
 
     iteration = comp_params.finetune_iterations

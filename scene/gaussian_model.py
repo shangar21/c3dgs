@@ -22,6 +22,7 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from enum import Enum
 from scene.diff_idx import DifferentiableIndexing 
+from typing import Tuple, Optional
 
 class ColorMode(Enum):
     NOT_INDEXED = 0
@@ -90,6 +91,9 @@ class GaussianModel:
         ).cuda()
         self.rotation_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
         self.xyz_qa = FakeQuantizationHalf.apply
+
+        self._residuals = None
+        self._residual_indices = None
 
         if not self.quantization:
             self.features_dc_qa.disable_fake_quant()
@@ -183,15 +187,47 @@ class GaussianModel:
 
     @property
     def get_features(self):
+        """
+        Retrieve the main (color) features and residual features (if available) and return them as a combined tensor.
+        """
+        # Apply the features_dc_qa function to the directional color features
         features_dc = self.features_dc_qa(self._features_dc)
+        
+        # Apply the features_rest_qa function to the remaining features
         features_rest = self.features_rest_qa(self._features_rest)
-        #features_rest = self._features_rest
+        
+        # Retrieve the main (color) features using their indices
+        main_features = torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
 
-        if self.color_index_mode == ColorMode.ALL_INDEXED:
-            return torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
-            #return torch.cat((features_dc[self._feature_indices], features_rest), dim=1)
+        #print("Features shape: ", main_features.shape)
+
+        # If residuals and residual indices are present, compute residual features
+        if self._residuals is not None and self._residual_indices is not None:
+            # Combine main features with residual features
+            residual_features_rest = self.features_rest_qa(self._residuals)
+            residual_features = residual_features_rest[self._residual_indices]
+            combined_features = main_features + residual_features
         else:
+            combined_features = main_features
+
+        # If ColorMode.ALL_INDEXED, return the indexed combined features
+        if self.color_index_mode == ColorMode.ALL_INDEXED:
+            return combined_features
+        else:
+            # Otherwise, return all features (main + residual if applicable)
             return torch.cat((features_dc, features_rest), dim=1)
+
+    #@property
+    #def get_features(self):
+    #    features_dc = self.features_dc_qa(self._features_dc)
+    #    features_rest = self.features_rest_qa(self._features_rest)
+    #    #features_rest = self._features_rest
+
+    #    if self.color_index_mode == ColorMode.ALL_INDEXED:
+    #        return torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
+    #        #return torch.cat((features_dc[self._feature_indices], features_rest), dim=1)
+    #    else:
+    #        return torch.cat((features_dc, features_rest), dim=1)
         
     @property
     def _get_features_raw(self):
@@ -799,17 +835,48 @@ class GaussianModel:
                 self._scaling = nn.Parameter(self._scaling[mask], requires_grad=True)
                 self._rotation = nn.Parameter(self._rotation[mask], requires_grad=True)
 
-    def set_color_indexed(self, features: torch.Tensor, indices: torch.Tensor):
+#    def set_color_indexed(self, features: torch.Tensor, indices: torch.Tensor):
+#        self._feature_indices = torch.Tensor(indices).cuda()
+#        #self._feature_indices_mlp = DifferentiableIndexing(indices.shape[0], features.shape[0]).cuda()
+#        #self._feature_indices_mlp = torch.compile(self._feature_indices_mlp)
+#        print("Compressed features shape: ", features.shape)
+#        self._features_dc = nn.Parameter(features[:, :1].detach(), requires_grad=True)
+#        #num_sh_coefs = (self.active_sh_degree + 1) ** 2
+#        #num_points = len(self._xyz)
+#        #random_sh_features = torch.rand(num_points, num_sh_coefs, 3).cuda()
+#        #self._features_rest = nn.Parameter(random_sh_features, requires_grad=True)
+#        self._features_rest = nn.Parameter(features[:, 1:].detach(), requires_grad=True)
+#        self.color_index_mode = ColorMode.ALL_INDEXED
+
+    def set_color_indexed(
+        self,
+        features: torch.Tensor,
+        indices: torch.Tensor,
+        residuals: torch.Tensor = None,
+        residual_indices: torch.Tensor = None
+    ):
+        """
+        Store the compressed features and corresponding indices for both main (color) and residual features.
+        """
+        # Store the main feature indices
         self._feature_indices = torch.Tensor(indices).cuda()
-        #self._feature_indices_mlp = DifferentiableIndexing(indices.shape[0], features.shape[0]).cuda()
-        #self._feature_indices_mlp = torch.compile(self._feature_indices_mlp)
+
         print("Compressed features shape: ", features.shape)
+
+        # Store the color features (compressed)
         self._features_dc = nn.Parameter(features[:, :1].detach(), requires_grad=True)
-        #num_sh_coefs = (self.active_sh_degree + 1) ** 2
-        #num_points = len(self._xyz)
-        #random_sh_features = torch.rand(num_points, num_sh_coefs, 3).cuda()
-        #self._features_rest = nn.Parameter(random_sh_features, requires_grad=True)
+
+        # If residuals are provided, store them
+        if residuals is not None and residual_indices is not None:
+            self._residuals = nn.Parameter(residuals.detach(), requires_grad=True)
+            self._residual_indices = torch.Tensor(residual_indices).cuda()
+            print("Residuals shape: ", residuals.shape)
+        else:
+            self._residuals = None
+            self._residual_indices = None
+
         self._features_rest = nn.Parameter(features[:, 1:].detach(), requires_grad=True)
+
         self.color_index_mode = ColorMode.ALL_INDEXED
 
     def set_gaussian_indexed(

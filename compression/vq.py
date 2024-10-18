@@ -71,6 +71,113 @@ class VectorQuantize(nn.Module):
             return self.codebook[idx], idx
 
 
+class ResidualQuantize(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        codebook_size: int = 2**12,
+        residual_codebook_size: int = 2**12,  # Size of the residual codebook
+        decay: float = 0.5,
+    ) -> None:
+        super().__init__()
+        self.decay = decay
+
+        # Main codebook for color quantization
+        self.codebook = nn.Parameter(
+            torch.empty(codebook_size, channels), requires_grad=False
+        )
+        nn.init.kaiming_uniform_(self.codebook)
+
+        # Residual codebook for residual quantization
+        self.residual_codebook = nn.Parameter(
+            torch.empty(residual_codebook_size, channels), requires_grad=False
+        )
+        nn.init.kaiming_uniform_(self.residual_codebook)
+
+        # Importance tracking for EMA updates
+        self.entry_importance = nn.Parameter(
+            torch.zeros(codebook_size), requires_grad=False
+        )
+        self.residual_entry_importance = nn.Parameter(
+            torch.zeros(residual_codebook_size), requires_grad=False
+        )
+
+        self.eps = 1e-5
+
+    def uniform_init(self, x: torch.Tensor):
+        amin, amax = x.aminmax()
+        # Initialize both the color and residual codebooks
+        self.codebook.data = torch.rand_like(self.codebook) * (amax - amin) + amin
+        self.residual_codebook.data = torch.rand_like(self.residual_codebook) * (amax - amin) + amin
+
+    def update(self, x: torch.Tensor, importance: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        with torch.no_grad():
+            # Step 1: Quantize using the main (color) codebook
+            min_dists, idx = weightedDistance(x.detach(), self.codebook.detach())
+            acc_importance = scatter(
+                importance, idx, 0, reduce="sum", dim_size=self.codebook.shape[0]
+            )
+
+            # Update color codebook with EMA
+            ema_inplace(self.entry_importance, acc_importance, self.decay)
+            codebook = scatter(
+                x * importance[:, None],
+                idx,
+                0,
+                reduce="sum",
+                dim_size=self.codebook.shape[0],
+            )
+            ema_inplace(
+                self.codebook,
+                codebook / (acc_importance[:, None] + self.eps),
+                self.decay,
+            )
+
+            # Step 2: Compute residuals (difference between input and quantized colors)
+            residuals = x - self.codebook[idx]
+
+            # Step 3: Quantize the residuals using the residual codebook
+            min_dists_residual, idx_residual = weightedDistance(residuals.detach(), self.residual_codebook.detach())
+            acc_importance_residual = scatter(
+                importance, idx_residual, 0, reduce="sum", dim_size=self.residual_codebook.shape[0]
+            )
+
+            # Update residual codebook with EMA
+            ema_inplace(self.residual_entry_importance, acc_importance_residual, self.decay)
+            residual_codebook = scatter(
+                residuals * importance[:, None],
+                idx_residual,
+                0,
+                reduce="sum",
+                dim_size=self.residual_codebook.shape[0],
+            )
+            ema_inplace(
+                self.residual_codebook,
+                residual_codebook / (acc_importance_residual[:, None] + self.eps),
+                self.decay,
+            )
+
+            return min_dists, min_dists_residual
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_dists: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        # Step 1: Quantize using the main (color) codebook
+        min_dists, idx = weightedDistance(x.detach(), self.codebook.detach())
+
+        # Step 2: Compute residuals (difference between input and quantized colors)
+        residuals = x - self.codebook[idx]
+
+        # Step 3: Quantize the residuals using the residual codebook
+        min_dists_residual, idx_residual = weightedDistance(residuals.detach(), self.residual_codebook.detach())
+
+        if return_dists:
+            return self.codebook[idx], idx, self.residual_codebook[idx_residual], idx_residual, min_dists, min_dists_residual
+        else:
+            return self.codebook[idx], idx, self.residual_codebook[idx_residual], idx_residual
+
 def ema_inplace(moving_avg: torch.Tensor, new: torch.Tensor, decay: float):
     moving_avg.data.mul_(decay).add_(new, alpha=(1 - decay))
 
@@ -115,6 +222,49 @@ def vq_features(
     print(f"calculating indices took {end-start} seconds ")
     return vq_model.codebook.data.detach(), vq_indices.detach()
 
+def vq_residual_features(
+    features: torch.Tensor,
+    importance: torch.Tensor,
+    codebook_size: int,
+    n_codebooks: int = 2,  # Number of residual codebooks
+    vq_chunk: int = 2**16,
+    steps: int = 1000,
+    decay: float = 0.8,
+    scale_normalize: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    importance_n = importance / importance.max()
+    vq_model = ResidualQuantize(
+        channels=features.shape[-1],
+        codebook_size=codebook_size,
+        n_codebooks=n_codebooks,  # Number of codebooks including main and residual
+        decay=decay,
+    ).to(device=features.device)
+
+    vq_model.uniform_init(features)
+
+    errors = []
+    for i in trange(steps):
+        batch = torch.randint(low=0, high=features.shape[0], size=[vq_chunk])
+        vq_feature = features[batch]
+        error = vq_model.update(vq_feature, importance=importance_n[batch]).mean().item()
+        errors.append(error)
+        if scale_normalize:
+            # Normalize the eigenvalues/scales of the last codebook (for stability)
+            tr = vq_model.main_codebook[:, [0, 3, 5]].sum(-1)
+            vq_model.main_codebook /= tr[:, None]
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # After training, quantize the entire feature set
+    start = time.time()
+    _, vq_indices_main, vq_indices_residual = vq_model(features)
+    torch.cuda.synchronize(device=vq_indices_main.device)
+    end = time.time()
+    print(f"calculating indices took {end-start} seconds ")
+
+    return vq_model.main_codebook.data.detach(), vq_indices_main.detach(), vq_indices_residual
+
 
 def join_features(
     all_features: torch.Tensor,
@@ -145,57 +295,120 @@ class CompressionSettings:
     decay: float
     batch_size: int
 
-
 def compress_color(
     gaussians: GaussianModel,
     color_importance: torch.Tensor,
     color_comp: CompressionSettings,
     color_compress_non_dir: bool,
-    in_training = False
+    in_training=False
 ):
+    # Determine which features to keep and which to quantize
     keep_mask = color_importance > color_comp.importance_include
     print("COMPRESS COLOR IMPORTANCE SHAPE: ", color_importance.shape)
 
-    print(
-        f"color keep: {keep_mask.float().mean()*100:.2f}%"
-    )
+    print(f"color keep: {keep_mask.float().mean() * 100:.2f}%")
 
     vq_mask_c = ~keep_mask
 
-    # remove zero sh component
+    # Get the features from the Gaussian model
     if color_compress_non_dir:
         n_sh_coefs = gaussians.get_features.shape[1]
         color_features = gaussians.get_features.detach().flatten(-2)
     else:
         n_sh_coefs = gaussians.get_features.shape[1] - 1
         color_features = gaussians.get_features[:, 1:].detach().flatten(-2)
-    if vq_mask_c.any():
-        print("compressing color...")
-        color_codebook, color_vq_indices = vq_features(
-            color_features[vq_mask_c],
-            color_importance[vq_mask_c],
-            color_comp.codebook_size,
-            color_comp.batch_size,
-            color_comp.steps,
-        )
-    else:
-        color_codebook = torch.empty(
-            (0, color_features.shape[-1]), device=color_features.device
-        )
-        color_vq_indices = torch.empty(
-            (0,), device=color_features.device, dtype=torch.long
-        )
 
+    if vq_mask_c.any():
+        print("Compressing color and residuals...")
+        
+        # Create a VectorQuantize object to handle color and residual quantization
+        vq_model = ResidualQuantize(
+            channels=color_features.shape[-1],
+            codebook_size=color_comp.codebook_size,
+            residual_codebook_size=color_comp.codebook_size,
+            decay=color_comp.decay
+        ).to(device=color_features.device)
+
+        vq_model.uniform_init(color_features)
+
+        # Perform vector quantization for both color and residuals
+        color_codebook, color_indices, residual_codebook, residual_indices = vq_model(color_features[vq_mask_c])
+    else:
+        # Empty tensors if there are no features to quantize
+        color_codebook = torch.empty((0, color_features.shape[-1]), device=color_features.device)
+        color_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
+        residual_codebook = torch.empty((0, color_features.shape[-1]), device=color_features.device)
+        residual_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
+
+    # Combine the compressed features and indices
     all_features = color_features
     compressed_features, indices = join_features(
-        all_features, keep_mask, color_codebook, color_vq_indices
+        all_features, keep_mask, color_codebook, color_indices
     )
 
-    #permu = torch.randperm(indices.size(0))
-    #indices = indices[permu]
-    
-    print("Number of sh coefs: ", n_sh_coefs)
-    gaussians.set_color_indexed(compressed_features.reshape(-1, n_sh_coefs, 3), indices)
+    # Store the residuals separately
+    residual_features, residual_indices = join_features(
+        all_features, keep_mask, residual_codebook, residual_indices
+    )
+
+    # Set the compressed color and residual features in the Gaussian model
+    gaussians.set_color_indexed(
+        compressed_features.reshape(-1, n_sh_coefs, 3),
+        indices,
+        residuals=residual_features.reshape(-1, n_sh_coefs, 3),
+        residual_indices=residual_indices
+    )
+
+#def compress_color(
+#    gaussians: GaussianModel,
+#    color_importance: torch.Tensor,
+#    color_comp: CompressionSettings,
+#    color_compress_non_dir: bool,
+#    in_training = False
+#):
+#    keep_mask = color_importance > color_comp.importance_include
+#    print("COMPRESS COLOR IMPORTANCE SHAPE: ", color_importance.shape)
+#
+#    print(
+#        f"color keep: {keep_mask.float().mean()*100:.2f}%"
+#    )
+#
+#    vq_mask_c = ~keep_mask
+#
+#    # remove zero sh component
+#    if color_compress_non_dir:
+#        n_sh_coefs = gaussians.get_features.shape[1]
+#        color_features = gaussians.get_features.detach().flatten(-2)
+#    else:
+#        n_sh_coefs = gaussians.get_features.shape[1] - 1
+#        color_features = gaussians.get_features[:, 1:].detach().flatten(-2)
+#    if vq_mask_c.any():
+#        print("compressing color...")
+#        color_codebook, color_vq_indices = vq_features(
+#            color_features[vq_mask_c],
+#            color_importance[vq_mask_c],
+#            color_comp.codebook_size,
+#            color_comp.batch_size,
+#            color_comp.steps,
+#        )
+#    else:
+#        color_codebook = torch.empty(
+#            (0, color_features.shape[-1]), device=color_features.device
+#        )
+#        color_vq_indices = torch.empty(
+#            (0,), device=color_features.device, dtype=torch.long
+#        )
+#
+#    all_features = color_features
+#    compressed_features, indices = join_features(
+#        all_features, keep_mask, color_codebook, color_vq_indices
+#    )
+#
+#    #permu = torch.randperm(indices.size(0))
+#    #indices = indices[permu]
+#    
+#    print("Number of sh coefs: ", n_sh_coefs)
+#    gaussians.set_color_indexed(compressed_features.reshape(-1, n_sh_coefs, 3), indices)
 
 #def compress_covariance(
 #    gaussians: GaussianModel,
