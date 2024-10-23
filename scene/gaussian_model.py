@@ -21,7 +21,8 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from enum import Enum
-
+from scene.diff_idx import DifferentiableIndexing 
+from typing import Tuple, Optional
 
 class ColorMode(Enum):
     NOT_INDEXED = 0
@@ -55,6 +56,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
     def __init__(self, sh_degree: int, quantization=True):
+        super(GaussianModel, self).__init__()
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -89,6 +91,9 @@ class GaussianModel:
         ).cuda()
         self.rotation_qa = torch.ao.quantization.FakeQuantize(dtype=torch.qint8).cuda()
         self.xyz_qa = FakeQuantizationHalf.apply
+
+        self._residuals = None
+        self._residual_indices = None
 
         if not self.quantization:
             self.features_dc_qa.disable_fake_quant()
@@ -182,13 +187,47 @@ class GaussianModel:
 
     @property
     def get_features(self):
+        """
+        Retrieve the main (color) features and residual features (if available) and return them as a combined tensor.
+        """
+        # Apply the features_dc_qa function to the directional color features
         features_dc = self.features_dc_qa(self._features_dc)
+        
+        # Apply the features_rest_qa function to the remaining features
         features_rest = self.features_rest_qa(self._features_rest)
+        
+        # Retrieve the main (color) features using their indices
+        main_features = torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
 
-        if self.color_index_mode == ColorMode.ALL_INDEXED:
-            return torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
+        #print("Features shape: ", main_features.shape)
+
+        # If residuals and residual indices are present, compute residual features
+        if self._residuals is not None and self._residual_indices is not None:
+            # Combine main features with residual features
+            residual_features_rest = self.features_rest_qa(self._residuals)
+            residual_features = residual_features_rest[self._residual_indices]
+            combined_features = main_features + residual_features
         else:
+            combined_features = main_features
+
+        # If ColorMode.ALL_INDEXED, return the indexed combined features
+        if self.color_index_mode == ColorMode.ALL_INDEXED:
+            return combined_features
+        else:
+            # Otherwise, return all features (main + residual if applicable)
             return torch.cat((features_dc, features_rest), dim=1)
+
+    #@property
+    #def get_features(self):
+    #    features_dc = self.features_dc_qa(self._features_dc)
+    #    features_rest = self.features_rest_qa(self._features_rest)
+    #    #features_rest = self._features_rest
+
+    #    if self.color_index_mode == ColorMode.ALL_INDEXED:
+    #        return torch.cat((features_dc, features_rest), dim=1)[self._feature_indices]
+    #        #return torch.cat((features_dc[self._feature_indices], features_rest), dim=1)
+    #    else:
+    #        return torch.cat((features_dc, features_rest), dim=1)
         
     @property
     def _get_features_raw(self):
@@ -796,16 +835,56 @@ class GaussianModel:
                 self._scaling = nn.Parameter(self._scaling[mask], requires_grad=True)
                 self._rotation = nn.Parameter(self._rotation[mask], requires_grad=True)
 
-    def set_color_indexed(self, features: torch.Tensor, indices: torch.Tensor):
-        self._feature_indices = nn.Parameter(indices, requires_grad=False)
+#    def set_color_indexed(self, features: torch.Tensor, indices: torch.Tensor):
+#        self._feature_indices = torch.Tensor(indices).cuda()
+#        #self._feature_indices_mlp = DifferentiableIndexing(indices.shape[0], features.shape[0]).cuda()
+#        #self._feature_indices_mlp = torch.compile(self._feature_indices_mlp)
+#        print("Compressed features shape: ", features.shape)
+#        self._features_dc = nn.Parameter(features[:, :1].detach(), requires_grad=True)
+#        #num_sh_coefs = (self.active_sh_degree + 1) ** 2
+#        #num_points = len(self._xyz)
+#        #random_sh_features = torch.rand(num_points, num_sh_coefs, 3).cuda()
+#        #self._features_rest = nn.Parameter(random_sh_features, requires_grad=True)
+#        self._features_rest = nn.Parameter(features[:, 1:].detach(), requires_grad=True)
+#        self.color_index_mode = ColorMode.ALL_INDEXED
+
+    def set_color_indexed(
+        self,
+        features: torch.Tensor,
+        indices: torch.Tensor,
+        residuals: torch.Tensor = None,
+        residual_indices: torch.Tensor = None
+    ):
+        """
+        Store the compressed features and corresponding indices for both main (color) and residual features.
+        """
+        # Store the main feature indices
+        self._feature_indices = torch.Tensor(indices).cuda()
+
+        print("Compressed features shape: ", features.shape)
+
+        # Store the color features (compressed)
         self._features_dc = nn.Parameter(features[:, :1].detach(), requires_grad=True)
+
+        # If residuals are provided, store them
+        if residuals is not None and residual_indices is not None:
+            self._residuals = nn.Parameter(residuals.detach(), requires_grad=True)
+            self._residual_indices = torch.Tensor(residual_indices).cuda()
+            print("Residuals shape: ", residuals.shape)
+        else:
+            self._residuals = None
+            self._residual_indices = None
+
         self._features_rest = nn.Parameter(features[:, 1:].detach(), requires_grad=True)
+
         self.color_index_mode = ColorMode.ALL_INDEXED
 
     def set_gaussian_indexed(
         self, rotation: torch.Tensor, scaling: torch.Tensor, indices: torch.Tensor
     ):
-        self._gaussian_indices = nn.Parameter(indices.detach(), requires_grad=False)
+        self._gaussian_indices = torch.Tensor(indices.detach()).cuda()
+        self._gaussian_indices_mlp = DifferentiableIndexing(indices.shape[0], scaling.shape[0]).cuda() 
+        self._gaussian_indices_mlp = torch.compile(self._gaussian_indices_mlp)
         self._rotation = nn.Parameter(rotation.detach(), requires_grad=True)
         self._scaling = nn.Parameter(scaling.detach(), requires_grad=True)
 
@@ -813,6 +892,7 @@ class GaussianModel:
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        print("Setting feature max sh degree as : ", self.max_sh_degree)
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
@@ -847,7 +927,85 @@ class GaussianModel:
 
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
+        print("Features shape: ", self.get_features.shape)
         self.active_sh_degree = self.max_sh_degree
+
+    def reset_opacity(self):
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        self._opacity = opacities_new 
+        self._opacity = nn.Parameter(self._opacity, requires_grad=True)
+
+    def prune(self):
+        opacity_mask = (self._opacity.squeeze() > -9.9)
+        self.mask_splats(opacity_mask)
+
+    def densify(self, training_args):
+        with torch.no_grad():
+            # Prune Gaussians with zero opacity
+            #opacity_mask = (self._opacity.squeeze() > 0.005)
+            #self.mask_splats(opacity_mask)
+
+            # Proceed with densification
+            N = self._xyz.shape[0]
+            num_new_gaussians = N  # Number of new Gaussians to add
+
+            perturbation = torch.randn_like(self._xyz) * 0.01  # Small random perturbation
+            new_xyz = self._xyz.clone() + perturbation
+
+            # Randomize scaling and rotation close to original values
+            scaling_perturbation = torch.randn_like(self._scaling) * 0.01
+            new_scaling = self._scaling.clone() + scaling_perturbation
+
+            scaling_factor_perturbation = torch.randn_like(self._scaling_factor) * 0.01
+            new_scaling_factor = self._scaling_factor.clone() + scaling_factor_perturbation
+
+            rotation_perturbation = torch.randn_like(self._rotation) * 0.01
+            new_rotation = self._rotation.clone() + rotation_perturbation
+            # Normalize rotation if necessary
+            new_rotation = torch.nn.functional.normalize(new_rotation, dim=-1)
+
+            # opacity_perturbation = torch.randn_like(self._opacity) * 0.01
+            # new_opacity = self._opacity.clone() + opacity_perturbation
+            new_opacity = self._opacity.clone()  # Keep opacity the same
+
+            # Handle features
+            if self.is_color_indexed:
+                # We don't duplicate features; instead, we sample indices from existing ones
+                new_features_dc = None
+                new_features_rest = None
+            else:
+                new_features_dc = self._features_dc.clone()
+                new_features_rest = self._features_rest.clone()
+            #new_features_rest = self._features_rest.clone()
+
+            # Concatenate new Gaussians to existing ones
+            self._xyz = nn.Parameter(torch.cat([self._xyz, new_xyz], dim=0), requires_grad=True)
+            self._opacity = nn.Parameter(torch.cat([self._opacity, new_opacity], dim=0), requires_grad=True)
+            self._scaling = nn.Parameter(torch.cat([self._scaling, new_scaling], dim=0), requires_grad=True)
+            self._scaling_factor = nn.Parameter(torch.cat([self._scaling_factor, new_scaling_factor], dim=0), requires_grad=True)
+            self._rotation = nn.Parameter(torch.cat([self._rotation, new_rotation], dim=0), requires_grad=True)
+
+            # Handle feature indices
+            if self.is_color_indexed:
+                existing_feature_indices = self._feature_indices
+                new_feature_indices = existing_feature_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_feature_indices.device)]
+                self._feature_indices = nn.Parameter(torch.cat([self._feature_indices, new_feature_indices], dim=0), requires_grad=False)
+            else:
+                self._features_dc = nn.Parameter(torch.cat([self._features_dc, new_features_dc], dim=0), requires_grad=True)
+                self._features_rest = nn.Parameter(torch.cat([self._features_rest, new_features_rest], dim=0), requires_grad=True)
+           # self._features_rest = nn.Parameter(torch.cat([self._features_rest, new_features_rest], dim=0), requires_grad=True)
+
+            # Handle Gaussian indices
+            if self.is_gaussian_indexed:
+                existing_gaussian_indices = self._gaussian_indices
+                new_gaussian_indices = existing_gaussian_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_gaussian_indices.device)]
+                self._gaussian_indices = nn.Parameter(torch.cat([self._gaussian_indices, new_gaussian_indices], dim=0), requires_grad=False)
+            else:
+                # Optionally, you can initialize indexing here if desired
+                pass  # No action needed if Gaussians are not indexed
+
+            # Re-initialize the optimizer to include new parameters
+            self.training_setup(training_args)
 
 
 class FakeQuantizationHalf(torch.autograd.Function):

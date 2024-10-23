@@ -10,9 +10,8 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import  Namespace
 import json
+import torchvision
 from arguments import ModelParams, PipelineParams
-from compression import vq
-from typing import Dict, Tuple
 
 def accumulate_gradients(grad_storage, model):
     for name, param in model.named_parameters():
@@ -32,29 +31,11 @@ def calculate_statistics(grad_storage):
 
     return gradients_mean, gradients_median
 
-def compress_in_training(scene, pipe, comp):
-    color_importance = torch.ones(scene.gaussians._feature_indices.shape[0]) 
-    color_compression_settings = vq.CompressionSettings(
-            codebook_size=comp.color_codebook_size,
-            importance_prune=comp.color_importance_prune,
-            importance_include=comp.color_importance_include,
-            steps=int(comp.color_cluster_iterations),
-            decay=comp.color_decay,
-            batch_size=comp.color_batch_size,
-        )
-    vq.compress_color(scene.gaussians, color_importance, color_compression_settings, comp.color_compress_non_dir)
-
-def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from, skip_densify = False):
+def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_from, use_mlp_every=100):
     prepare_output_and_logger(comp.output_vq, dataset)
-
-    print("Scene loader iter: ", scene.loaded_iter)
-
-    first_iter = scene.loaded_iter
-
-    print("first iter: ", first_iter)
     
-    #max_iter = first_iter + comp.finetune_iterations
-    max_iter = comp.finetune_iterations
+    first_iter = scene.loaded_iter
+    max_iter = first_iter + comp.finetune_iterations
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -67,70 +48,89 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, max_iter + 1), desc="Training progress")
+    progress_bar = tqdm(range(first_iter, max_iter), desc="Training progress")
     first_iter += 1
     psnr_track = []
     loss_track = []
     ssim_track = []
-    transparent_count_track = []
     grad_storage = {}
     log_interval = 200
     gradients_log = []
-
-    # Define K for densification interval
-    K = 1000  # You can adjust this value as needed
-    num_codes = comp.color_codebook_size
-
+    count = 0
+    use_mlp = False
+    
     for iteration in range(first_iter, max_iter + 1):
         iter_start.record()
 
-        # Densify Gaussians every K iterations
-        if iteration % K == 0 and iteration >= 3000 and iteration <= 20_000 and not skip_densify: 
-            #compress_in_training(scene, pipe, comp)
-            if iteration in [3000, 6000, 9000, 12000]:
-                scene.gaussians.prune()
-                scene.gaussians.densify(opt)
-                #scene.gaussians.reset_opacity()
-            # Update learning rates and optimizer after densification
-            scene.gaussians.update_learning_rate(iteration)
-            # Reset the optimizer's gradients
-            scene.gaussians.optimizer.zero_grad()
-
-        #if iteration >= max_iter:
-        #    scene.gaussians.prune()
-
         # Pick a random Camera
-        if not viewpoint_stack or len(viewpoint_stack) == 0:
+        if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
 
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background, use_mlp=False)
-        image = render_pkg["render"]
+
+        if count == use_mlp_every or use_mlp:
+            count -= 1
+            use_mlp = count > 0
+            render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background, use_mlp=use_mlp)
+        else:
+            count += 1
+            render_pkg = render(viewpoint_cam, scene.gaussians, pipe, background)
+
+        image, viewspace_point_tensor, visibility_filter, radii = (
+            render_pkg["render"],
+            render_pkg["viewspace_points"],
+            render_pkg["visibility_filter"],
+            render_pkg["radii"],
+        )
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (
+            1.0 - ssim(image, gt_image)
+        )
+
+        if use_mlp:
+            # Disable gradients for all parameters
+            for name, param in scene.gaussians.named_parameters():
+                param.requires_grad = False
+            
+            # Enable gradients only for specific submodule (e.g., DifferentiableIndexing MLP)
+            for name, module in scene.gaussians.named_modules():
+                if 'mlp' in name:
+                    for pname, param in module.named_parameters():
+                        param.requires_grad = True
+        else:
+            for name, param in scene.gaussians.named_parameters():
+                if 'mlp' not in name:
+                    param.requires_grad = True    
+                else:
+                    param.requires_grad = False
+
         loss.backward()
+        
+        accumulate_gradients(grad_storage, scene.gaussians)
 
-        #accumulate_gradients(grad_storage, scene.gaussians)
+        if iteration % log_interval == 0:
+            gradients_mean, gradients_median = calculate_statistics(grad_storage)
+            gradients_log.append({
+                'iteration': iteration,
+                'gradients_mean': gradients_mean,
+                'gradients_median': gradients_median
+            })
+            grad_storage.clear()
+            json.dump(gradients_log, open(f"./output/{scene.model_name}/gradient_log.json", 'w+'))
 
-        #if iteration % log_interval == 0:
-        #    gradients_mean, gradients_median = calculate_statistics(grad_storage)
-        #    gradients_log.append({
-        #        'iteration': iteration,
-        #        'gradients_mean': gradients_mean,
-        #        'gradients_median': gradients_median
-        #    })
-        #    grad_storage.clear()
-        #    json.dump(gradients_log, open(f"./output/{scene.model_name}/gradient_log.json", 'w+'))
+        tmp = psnr(image, gt_image).mean().item()
 
-        if iteration == first_iter or iteration % 5 == 0:
+
+
+        if iteration == first_iter or iteration % 5 == 0 or True:
             eval_results = {}
-
+            
             test_psnrs = []
             test_losses = []
             test_ssims = []
@@ -144,13 +144,13 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             eval_results['PSNR'] = sum(test_psnrs) / len(test_psnrs)
             eval_results['LOSS'] = sum(test_losses) / len(test_losses)
             eval_results['SSIM'] = sum(test_ssims) / len(test_ssims)
+
             psnr_track.append(eval_results['PSNR'])
             json.dump(psnr_track, open(f"./output/{scene.model_name}/diff_idx_psnr.json", 'w+'))
             loss_track.append(eval_results["LOSS"])
             json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
             ssim_track.append(eval_results['SSIM'])
-            json.dump(ssim_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
-
+            json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
 
         iter_end.record()
         scene.gaussians.update_learning_rate(iteration)
@@ -159,7 +159,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "SH Degree": scene.gaussians.active_sh_degree, "Max SH Degree": scene.gaussians.max_sh_degree})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", 'PSNR': tmp})
                 progress_bar.update(10)
             if iteration == max_iter:
                 progress_bar.close()
@@ -168,6 +168,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             if iteration < max_iter:
                 scene.gaussians.optimizer.step()
                 scene.gaussians.optimizer.zero_grad()
+
 
 def prepare_output_and_logger(output_folder, args):
     if not output_folder:

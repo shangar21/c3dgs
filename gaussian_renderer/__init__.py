@@ -17,7 +17,9 @@ from diff_gaussian_rasterization import (
     GaussianRasterizerIndexed,
 )
 from scene.gaussian_model import ColorMode, GaussianModel
+from scene.diff_idx import DifferentiableIndexing, model_inference
 from utils.sh_utils import eval_sh
+import pdb
 
 
 def render(
@@ -29,6 +31,7 @@ def render(
     override_color=None,
     clamp_color: bool = True,
     cov3d: torch.Tensor = None,
+    use_mlp=False
 ):
     """
     Render the scene.
@@ -78,6 +81,10 @@ def render(
         scales = pc.get_scaling_normalized
         scale_factors = pc.get_scaling_factor
         rotations = pc._rotation_post_activation
+
+        if use_mlp:
+            pc._feature_indices = model_inference(pc._feature_indices_mlp, torch.arange(start = 0, end = pc._feature_indices.shape[0]))
+            pc._gaussian_indices = model_inference(pc._gaussian_indices_mlp, torch.arange(start = 0, end = pc._gaussian_indices.shape[0]))
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
         rendered_image, radii = rasterizer(

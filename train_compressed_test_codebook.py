@@ -35,7 +35,8 @@ from compression.vq import CompressionSettings, compress_gaussians
 from gaussian_renderer import GaussianModel, render
 from lpipsPyTorch import lpips
 from scene import Scene
-from finetune import finetune
+from finetune import finetune as finetune_no_mlp
+from finetune_mlp import finetune
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
 import scene.diff_idx as diff_idx
@@ -88,12 +89,8 @@ def calc_importance(
     return importance.detach(), cov_grad.detach()
 
 def initialize_gaussians(model_params, comp_params):
-    gaussians = GaussianModel(3, quantization=True)
+    gaussians = GaussianModel(model_params.sh_degree if model_params.sh_degree else 3, quantization=True)
     scene = Scene(model_params, gaussians, load_iteration="", shuffle=True)
-
-    gaussians._gaussian_indices = None
-    gaussians._feature_indices = None
-    
     return gaussians, scene
 
 def initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params):
@@ -127,7 +124,9 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
             color_importance_n,
             gaussian_importance_n,
             color_compression_settings if not comp_params.not_compress_color else None,
-            None,
+            gaussian_compression_settings
+            if not comp_params.not_compress_gaussians
+            else None,
             comp_params.color_compress_non_dir,
             prune_threshold=comp_params.prune_threshold,
         )
@@ -138,9 +137,17 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
 
     model_params.model_path = comp_params.output_vq
 
-    gaussians._gaussian_indices = None
-
     return gaussians, scene
+
+def initialize_diff_indexing(scene, gaussians):
+    gaussian_indices = gaussians._gaussian_indices
+    feature_indices = gaussians._feature_indices
+
+    diff_idx.initial_train(gaussians._gaussian_indices_mlp, gaussian_indices, n_epochs=20)
+    diff_idx.initial_train(gaussians._feature_indices_mlp, feature_indices, n_epochs=50)
+
+    # test feature indices
+    out = diff_idx.model_inference(gaussians._feature_indices_mlp, gaussians._feature_indices)
 
 def render_and_eval(
     gaussians: GaussianModel,
@@ -178,6 +185,9 @@ def render_and_eval(
             "LPIPS": torch.tensor(lpipss).mean().item(),
         }
 
+
+
+
 if __name__ == "__main__":
     parser = ArgumentParser(description="Compression script parameters")
     model = ModelParams(parser, sentinel=True)
@@ -193,6 +203,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--no_mlp", action='store_true', default=False)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -204,51 +215,67 @@ if __name__ == "__main__":
     comp_params.finetune_iterations = 0
     if not model_params.sh_degree:
         model_params.sh_degree = 3
+    
+    base_path = model_params.model_path
 
-    gaussians, scene = initialize_gaussians(model_params, comp_params)
+    for i in range(10, 17):
+        print(f'---------------------------{base_path} codebook size {2 ** i}-----------------------------')
+        comp_params.color_codebook_size = 2 ** i
+        comp_params.gaussian_codebook_size = 2 ** i
+        model_params.model_path = f"{base_path}_codebook_size_{2 ** i}"
+        comp_params.output_vq = model_params.model_path
 
-#    comp_params.finetune_iterations = 15000
-#    scene.loaded_iter = 0
-#    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
+        gaussians, scene = initialize_gaussians(model_params, comp_params)
+        scene.model_name = model_params.model_path.replace('./output/', '')
 
-    if not os.path.exists(f"renders/{scene.model_name}/"):
-        os.mkdir(f"renders/{scene.model_name}/")
-    if not os.path.exists(f"renders/{scene.model_name}/training"):
-        os.mkdir(f"renders/{scene.model_name}/training")
+        if not os.path.exists(f"renders/{scene.model_name}/"):
+            os.makedirs(f"renders/{scene.model_name}/", exist_ok=True)
+        if not os.path.exists(f"renders/{scene.model_name}/training"):
+            os.makedirs(f"renders/{scene.model_name}/training", exist_ok=True)
 
-    gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
+        gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
 
-    print("Gaussian indexed status: ", gaussians.is_gaussian_indexed)
+        if not args.no_mlp:
+            initialize_diff_indexing(scene, gaussians)
 
-    comp_params.finetune_iterations = 30_000
-    #comp_params.color_codebook_size = 2**16
-#    scene.loaded_iter = 15000
-    scene.loaded_iter = 0
+        comp_params.finetune_iterations = 3_000
+        scene.loaded_iter = 0
 
-    finetune(
-        scene,
-        model_params,
-        optim_params,
-        comp_params,
-        pipeline_params,
-        testing_iterations=[-1],
-        debug_from = -1,
-        skip_densify=False
-    )
+        if not args.no_mlp:
+            print("Not using MLP")
+            finetune_no_mlp(
+                scene,
+                model_params,
+                optim_params,
+                comp_params,
+                pipeline_params,
+                testing_iterations=[-1],
+                debug_from = -1
+            )
+        else:
+            finetune(
+                scene,
+                model_params,
+                optim_params,
+                comp_params,
+                pipeline_params,
+                testing_iterations=[-1],
+                debug_from = -1
+            )
 
-    iteration = comp_params.finetune_iterations
-    out_file = path.join(
-        comp_params.output_vq,
-        f"point_cloud/iteration_{iteration}/point_cloud.npz",
-    )
-    gaussians.save_npz(out_file, sort_morton=not comp_params.not_sort_morton)
-    file_size = os.path.getsize(out_file) / 1024**2
-    print(f"saved vq finetuned model to {out_file}")
+        iteration = comp_params.finetune_iterations
+        out_file = path.join(
+            comp_params.output_vq,
+            f"point_cloud/iteration_{iteration}/point_cloud.npz",
+        )
+        gaussians.save_npz(out_file, sort_morton=not comp_params.not_sort_morton)
+        file_size = os.path.getsize(out_file) / 1024**2
+        print(f"saved vq finetuned model to {out_file}")
 
-    # eval model
-    print("evaluating...")
-    metrics = render_and_eval(gaussians, scene, model_params, pipeline_params)
-    metrics["size"] = file_size
-    print(metrics)
-    with open(f"{comp_params.output_vq}/results.json","w") as f:
-        json.dump({f"ours_{iteration}":metrics},f,indent=4)
+        # eval model
+        print("evaluating...")
+        metrics = render_and_eval(gaussians, scene, model_params, pipeline_params)
+        metrics["size"] = file_size
+        print(metrics)
+        with open(f"{comp_params.output_vq}/results.json","w") as f:
+            json.dump({f"ours_{iteration}":metrics},f,indent=4)

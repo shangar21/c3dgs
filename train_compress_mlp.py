@@ -35,7 +35,7 @@ from compression.vq import CompressionSettings, compress_gaussians
 from gaussian_renderer import GaussianModel, render
 from lpipsPyTorch import lpips
 from scene import Scene
-from finetune import finetune
+from finetune_mlp import finetune
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
 import scene.diff_idx as diff_idx
@@ -88,12 +88,8 @@ def calc_importance(
     return importance.detach(), cov_grad.detach()
 
 def initialize_gaussians(model_params, comp_params):
-    gaussians = GaussianModel(3, quantization=True)
+    gaussians = GaussianModel(model_params.sh_degree if model_params.sh_degree else 3, quantization=True)
     scene = Scene(model_params, gaussians, load_iteration="", shuffle=True)
-
-    gaussians._gaussian_indices = None
-    gaussians._feature_indices = None
-    
     return gaussians, scene
 
 def initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params):
@@ -127,7 +123,9 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
             color_importance_n,
             gaussian_importance_n,
             color_compression_settings if not comp_params.not_compress_color else None,
-            None,
+            gaussian_compression_settings
+            if not comp_params.not_compress_gaussians
+            else None,
             comp_params.color_compress_non_dir,
             prune_threshold=comp_params.prune_threshold,
         )
@@ -138,9 +136,17 @@ def initial_compress(gaussians, scene, model_params, pipeline_params, optim_para
 
     model_params.model_path = comp_params.output_vq
 
-    gaussians._gaussian_indices = None
-
     return gaussians, scene
+
+def initialize_diff_indexing(scene, gaussians):
+    gaussian_indices = gaussians._gaussian_indices
+    feature_indices = gaussians._feature_indices
+
+    diff_idx.initial_train(gaussians._gaussian_indices_mlp, gaussian_indices, n_epochs=20)
+    diff_idx.initial_train(gaussians._feature_indices_mlp, feature_indices, n_epochs=50)
+
+    # test feature indices
+    out = diff_idx.model_inference(gaussians._feature_indices_mlp, gaussians._feature_indices)
 
 def render_and_eval(
     gaussians: GaussianModel,
@@ -178,6 +184,9 @@ def render_and_eval(
             "LPIPS": torch.tensor(lpipss).mean().item(),
         }
 
+
+
+
 if __name__ == "__main__":
     parser = ArgumentParser(description="Compression script parameters")
     model = ModelParams(parser, sentinel=True)
@@ -207,22 +216,15 @@ if __name__ == "__main__":
 
     gaussians, scene = initialize_gaussians(model_params, comp_params)
 
-#    comp_params.finetune_iterations = 15000
-#    scene.loaded_iter = 0
-#    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
-
     if not os.path.exists(f"renders/{scene.model_name}/"):
         os.mkdir(f"renders/{scene.model_name}/")
     if not os.path.exists(f"renders/{scene.model_name}/training"):
         os.mkdir(f"renders/{scene.model_name}/training")
 
     gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
+    initialize_diff_indexing(scene, gaussians)
 
-    print("Gaussian indexed status: ", gaussians.is_gaussian_indexed)
-
-    comp_params.finetune_iterations = 30_000
-    #comp_params.color_codebook_size = 2**16
-#    scene.loaded_iter = 15000
+    comp_params.finetune_iterations = 3_000
     scene.loaded_iter = 0
 
     finetune(
@@ -233,7 +235,7 @@ if __name__ == "__main__":
         pipeline_params,
         testing_iterations=[-1],
         debug_from = -1,
-        skip_densify=False
+        use_mlp_every=500
     )
 
     iteration = comp_params.finetune_iterations
