@@ -226,44 +226,60 @@ def vq_residual_features(
     features: torch.Tensor,
     importance: torch.Tensor,
     codebook_size: int,
-    n_codebooks: int = 2,  # Number of residual codebooks
     vq_chunk: int = 2**16,
     steps: int = 1000,
     decay: float = 0.8,
     scale_normalize: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Perform vector quantization on the main features and their residuals.
+    Returns both the main and residual codebooks along with their corresponding indices.
+    """
+    # Normalize importance
     importance_n = importance / importance.max()
+
+    # Create the ResidualQuantize model
     vq_model = ResidualQuantize(
         channels=features.shape[-1],
         codebook_size=codebook_size,
-        n_codebooks=n_codebooks,  # Number of codebooks including main and residual
+        residual_codebook_size=codebook_size, 
         decay=decay,
     ).to(device=features.device)
 
+    # Initialize the codebooks
     vq_model.uniform_init(features)
 
     errors = []
     for i in trange(steps):
+        # Randomly sample a batch for VQ
         batch = torch.randint(low=0, high=features.shape[0], size=[vq_chunk])
         vq_feature = features[batch]
-        error = vq_model.update(vq_feature, importance=importance_n[batch]).mean().item()
-        errors.append(error)
+
+        # Perform the update for both the main and residual codebooks
+        error_main, error_residual = vq_model.update(vq_feature, importance=importance_n[batch])
+        errors.append((error_main.mean().item(), error_residual.mean().item()))
+
+        # Optionally normalize the main codebook (for stability)
         if scale_normalize:
-            # Normalize the eigenvalues/scales of the last codebook (for stability)
             tr = vq_model.main_codebook[:, [0, 3, 5]].sum(-1)
             vq_model.main_codebook /= tr[:, None]
 
+    # Cleanup memory
     gc.collect()
     torch.cuda.empty_cache()
 
-    # After training, quantize the entire feature set
+    # After training, quantize the entire feature set using both main and residual codebooks
     start = time.time()
-    _, vq_indices_main, vq_indices_residual = vq_model(features)
+    feature_codebook, vq_indices_main, residual_codebook, vq_indices_residual = vq_model(features)
     torch.cuda.synchronize(device=vq_indices_main.device)
     end = time.time()
-    print(f"calculating indices took {end-start} seconds ")
 
-    return vq_model.main_codebook.data.detach(), vq_indices_main.detach(), vq_indices_residual
+    print(f"Calculating indices took {end - start} seconds")
+
+    # Return the main and residual codebooks, along with their respective indices
+    return vq_model.codebook.data.detach(), vq_indices_main.detach(), \
+           vq_model.residual_codebook.data.detach(), vq_indices_residual.detach()
+
 
 
 def join_features(
@@ -302,10 +318,12 @@ def compress_color(
     color_compress_non_dir: bool,
     in_training=False
 ):
+    """
+    Compress the color features and residuals using vector quantization and store the result in the Gaussian model.
+    """
     # Determine which features to keep and which to quantize
     keep_mask = color_importance > color_comp.importance_include
     print("COMPRESS COLOR IMPORTANCE SHAPE: ", color_importance.shape)
-
     print(f"color keep: {keep_mask.float().mean() * 100:.2f}%")
 
     vq_mask_c = ~keep_mask
@@ -318,46 +336,42 @@ def compress_color(
         n_sh_coefs = gaussians.get_features.shape[1] - 1
         color_features = gaussians.get_features[:, 1:].detach().flatten(-2)
 
+    # Check if there are features to quantize
     if vq_mask_c.any():
         print("Compressing color and residuals...")
-        
-        # Create a VectorQuantize object to handle color and residual quantization
-        vq_model = ResidualQuantize(
-            channels=color_features.shape[-1],
+
+        # Perform vector quantization using the vq_residual_features function
+        color_codebook, color_vq_indices, residual_codebook, residual_vq_indices = vq_residual_features(
+            features=color_features[vq_mask_c],
+            importance=color_importance[vq_mask_c],
             codebook_size=color_comp.codebook_size,
-            residual_codebook_size=color_comp.codebook_size,
-            decay=color_comp.decay
-        ).to(device=color_features.device)
-
-        vq_model.uniform_init(color_features)
-
-        # Perform vector quantization for both color and residuals
-        color_codebook, color_indices, residual_codebook, residual_indices = vq_model(color_features[vq_mask_c])
+            vq_chunk=color_comp.batch_size,
+            steps=color_comp.steps,
+        )
     else:
-        # Empty tensors if there are no features to quantize
+        # If there are no features to quantize, create empty tensors
         color_codebook = torch.empty((0, color_features.shape[-1]), device=color_features.device)
-        color_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
+        color_vq_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
         residual_codebook = torch.empty((0, color_features.shape[-1]), device=color_features.device)
-        residual_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
+        residual_vq_indices = torch.empty((0,), device=color_features.device, dtype=torch.long)
 
-    # Combine the compressed features and indices
+    # Combine the compressed features and indices for color and residuals
     all_features = color_features
-    compressed_features, indices = join_features(
-        all_features, keep_mask, color_codebook, color_indices
+    compressed_color_features, color_indices = join_features(
+        all_features, keep_mask, color_codebook, color_vq_indices
+    )
+    compressed_residual_features, residual_indices = join_features(
+        all_features, keep_mask, residual_codebook, residual_vq_indices
     )
 
-    # Store the residuals separately
-    residual_features, residual_indices = join_features(
-        all_features, keep_mask, residual_codebook, residual_indices
-    )
-
-    # Set the compressed color and residual features in the Gaussian model
+    # Store the compressed color and residual features in the Gaussian model
     gaussians.set_color_indexed(
-        compressed_features.reshape(-1, n_sh_coefs, 3),
-        indices,
-        residuals=residual_features.reshape(-1, n_sh_coefs, 3),
+        compressed_color_features.reshape(-1, n_sh_coefs, 3),
+        color_indices,
+        residuals=compressed_residual_features.reshape(-1, n_sh_coefs, 3),
         residual_indices=residual_indices
     )
+
 
 #def compress_color(
 #    gaussians: GaussianModel,

@@ -96,6 +96,16 @@ def initialize_gaussians(model_params, comp_params):
     
     return gaussians, scene
 
+def preload_gaussians(model_params, comp_params):
+    gaussians = GaussianModel(3, quantization=True)
+    scene = Scene(model_params, gaussians, load_iteration=-1, shuffle=True)
+
+    gaussians._gaussian_indices = None
+    gaussians._feature_indices = None
+    
+    return gaussians, scene
+
+
 def initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params):
     print("Setting up compressed model...")
     color_importance, gaussian_sensitivity = calc_importance(gaussians, scene, pipeline_params)
@@ -193,6 +203,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--preload", action='store_true', default=False)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -205,11 +216,14 @@ if __name__ == "__main__":
     if not model_params.sh_degree:
         model_params.sh_degree = 3
 
-    gaussians, scene = initialize_gaussians(model_params, comp_params)
+    if not args.preload:
+        gaussians, scene = initialize_gaussians(model_params, comp_params)
+    else:
+        gaussians, scene = preload_gaussians(model_params, comp_params)
 
-#    comp_params.finetune_iterations = 15000
-#    scene.loaded_iter = 0
-#    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
+    comp_params.finetune_iterations = 2500
+    scene.loaded_iter = 0
+    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
 
     if not os.path.exists(f"renders/{scene.model_name}/"):
         os.mkdir(f"renders/{scene.model_name}/")

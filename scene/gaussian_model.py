@@ -204,7 +204,8 @@ class GaussianModel:
         # If residuals and residual indices are present, compute residual features
         if self._residuals is not None and self._residual_indices is not None:
             # Combine main features with residual features
-            residual_features_rest = self.features_rest_qa(self._residuals)
+            #residual_features_rest = self.features_rest_qa(self._residuals)
+            residual_features_rest = self._residuals
             residual_features = residual_features_rest[self._residual_indices]
             combined_features = main_features + residual_features
         else:
@@ -990,6 +991,10 @@ class GaussianModel:
                 existing_feature_indices = self._feature_indices
                 new_feature_indices = existing_feature_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_feature_indices.device)]
                 self._feature_indices = nn.Parameter(torch.cat([self._feature_indices, new_feature_indices], dim=0), requires_grad=False)
+
+                existing_residual_indices = self._residual_indices
+                new_residual_indices = existing_residual_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_residual_indices.device)]
+                self._residual_indices = nn.Parameter(torch.cat([self._residual_indices, new_residual_indices], dim=0), requires_grad=False)
             else:
                 self._features_dc = nn.Parameter(torch.cat([self._features_dc, new_features_dc], dim=0), requires_grad=True)
                 self._features_rest = nn.Parameter(torch.cat([self._features_rest, new_features_rest], dim=0), requires_grad=True)
