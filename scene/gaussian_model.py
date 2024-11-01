@@ -532,6 +532,9 @@ class GaussianModel:
                 save_dict[
                     "features_rest_zero_point"
                 ] = self.features_rest_qa.zero_point.cpu().numpy()
+                if self._residuals is not None:
+                    save_dict["residuals"] = self._residuals.cpu().numpy()
+                    save_dict["residual_indices"] = self._residual_indices.detach().contiguous().cpu().int().numpy()
             else:
                 save_dict["features_dc"] = self._features_dc.detach().cpu().numpy()
                 save_dict["features_rest"] = self._features_rest.detach().cpu().numpy()
@@ -641,6 +644,14 @@ class GaussianModel:
             features_rest_zero_point = torch.from_numpy(
                 state_dict["features_rest_zero_point"]
             ).cuda()
+
+            if 'residuals' in state_dict:
+                residuals = torch.from_numpy(state_dict["residuals"]).cuda()
+                residual_indices = torch.from_numpy(state_dict["residual_indices"]).int().cuda()
+                self._residuals = nn.Parameter(residuals.detach(), requires_grad=True)
+                self._residual_indices = torch.Tensor(residual_indices).cuda()
+
+
             features_rest = (
                 features_rest_q - features_rest_zero_point
             ) * features_rest_scale
@@ -662,6 +673,8 @@ class GaussianModel:
             self.features_dc_qa.zero_point = features_dc_zero_point
             self.features_dc_qa.activation_post_process.min_val = features_dc.min()
             self.features_dc_qa.activation_post_process.max_val = features_dc.max()
+
+            
 
         else:
             features_dc = torch.from_numpy(state_dict["features_dc"]).float().cuda()
@@ -992,9 +1005,10 @@ class GaussianModel:
                 new_feature_indices = existing_feature_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_feature_indices.device)]
                 self._feature_indices = nn.Parameter(torch.cat([self._feature_indices, new_feature_indices], dim=0), requires_grad=False)
 
-                existing_residual_indices = self._residual_indices
-                new_residual_indices = existing_residual_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_residual_indices.device)]
-                self._residual_indices = nn.Parameter(torch.cat([self._residual_indices, new_residual_indices], dim=0), requires_grad=False)
+                if self._residual_indices is not None:
+                    existing_residual_indices = self._residual_indices
+                    new_residual_indices = existing_residual_indices[torch.randint(0, N, (num_new_gaussians,), device=existing_residual_indices.device)]
+                    self._residual_indices = nn.Parameter(torch.cat([self._residual_indices, new_residual_indices], dim=0), requires_grad=False)
             else:
                 self._features_dc = nn.Parameter(torch.cat([self._features_dc, new_features_dc], dim=0), requires_grad=True)
                 self._features_rest = nn.Parameter(torch.cat([self._features_rest, new_features_rest], dim=0), requires_grad=True)

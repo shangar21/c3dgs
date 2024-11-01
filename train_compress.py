@@ -223,19 +223,19 @@ if __name__ == "__main__":
 
     comp_params.finetune_iterations = 2500
     scene.loaded_iter = 0
-    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
 
+    finetune(scene, model_params, optim_params, comp_params, pipeline_params, testing_iterations=[-1], debug_from=-1)
     if not os.path.exists(f"renders/{scene.model_name}/"):
         os.mkdir(f"renders/{scene.model_name}/")
     if not os.path.exists(f"renders/{scene.model_name}/training"):
         os.mkdir(f"renders/{scene.model_name}/training")
 
+#    comp_params.color_codebook_size = 2**22
     gaussians, scene = initial_compress(gaussians, scene, model_params, pipeline_params, optim_params, comp_params)
 
     print("Gaussian indexed status: ", gaussians.is_gaussian_indexed)
 
     comp_params.finetune_iterations = 30_000
-    #comp_params.color_codebook_size = 2**16
 #    scene.loaded_iter = 15000
     scene.loaded_iter = 0
 

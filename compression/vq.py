@@ -316,7 +316,8 @@ def compress_color(
     color_importance: torch.Tensor,
     color_comp: CompressionSettings,
     color_compress_non_dir: bool,
-    in_training=False
+    in_training=False,
+    residual=False
 ):
     """
     Compress the color features and residuals using vector quantization and store the result in the Gaussian model.
@@ -341,13 +342,22 @@ def compress_color(
         print("Compressing color and residuals...")
 
         # Perform vector quantization using the vq_residual_features function
-        color_codebook, color_vq_indices, residual_codebook, residual_vq_indices = vq_residual_features(
-            features=color_features[vq_mask_c],
-            importance=color_importance[vq_mask_c],
-            codebook_size=color_comp.codebook_size,
-            vq_chunk=color_comp.batch_size,
-            steps=color_comp.steps,
-        )
+        if residual:
+            color_codebook, color_vq_indices, residual_codebook, residual_vq_indices = vq_residual_features(
+                features=color_features[vq_mask_c],
+                importance=color_importance[vq_mask_c],
+                codebook_size=color_comp.codebook_size,
+                vq_chunk=color_comp.batch_size,
+                steps=color_comp.steps,
+            )
+        else:
+            color_codebook, color_vq_indices = vq_features(
+                color_features[vq_mask_c],
+                color_importance[vq_mask_c],
+                color_comp.codebook_size,
+                color_comp.batch_size,
+                color_comp.steps,
+            )
     else:
         # If there are no features to quantize, create empty tensors
         color_codebook = torch.empty((0, color_features.shape[-1]), device=color_features.device)
@@ -360,16 +370,18 @@ def compress_color(
     compressed_color_features, color_indices = join_features(
         all_features, keep_mask, color_codebook, color_vq_indices
     )
-    compressed_residual_features, residual_indices = join_features(
-        all_features, keep_mask, residual_codebook, residual_vq_indices
-    )
+    
+    if residual:
+        compressed_residual_features, residual_indices = join_features(
+            all_features, keep_mask, residual_codebook, residual_vq_indices
+        )
 
     # Store the compressed color and residual features in the Gaussian model
     gaussians.set_color_indexed(
         compressed_color_features.reshape(-1, n_sh_coefs, 3),
         color_indices,
-        residuals=compressed_residual_features.reshape(-1, n_sh_coefs, 3),
-        residual_indices=residual_indices
+        residuals=compressed_residual_features.reshape(-1, n_sh_coefs, 3) if residual else None,
+        residual_indices=residual_indices if residual else None
     )
 
 

@@ -90,7 +90,7 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
             if iteration in [3000, 6000, 9000, 12000]:
                 scene.gaussians.prune()
                 scene.gaussians.densify(opt)
-                #scene.gaussians.reset_opacity()
+                scene.gaussians.reset_opacity()
             # Update learning rates and optimizer after densification
             scene.gaussians.update_learning_rate(iteration)
             # Reset the optimizer's gradients
@@ -128,28 +128,28 @@ def finetune(scene: Scene, dataset, opt, comp, pipe, testing_iterations, debug_f
         #    grad_storage.clear()
         #    json.dump(gradients_log, open(f"./output/{scene.model_name}/gradient_log.json", 'w+'))
 
-        if iteration == first_iter or iteration % 5 == 0:
-            eval_results = {}
+        #if iteration == first_iter or iteration % 5 == 0:
+        #    eval_results = {}
 
-            test_psnrs = []
-            test_losses = []
-            test_ssims = []
-            for tc in scene.getTestCameras():
-                t_img = render(tc, scene.gaussians, pipe, background, use_mlp=False)["render"]
-                test_psnrs.append(psnr(t_img, tc.original_image).mean().item())
-                test_ssims.append(ssim(t_img, tc.original_image).mean().item())
-                ll1_test = l1_loss(t_img, tc.original_image)
-                loss_test = (1.0 - opt.lambda_dssim) * ll1_test + opt.lambda_dssim * (1.0 - ssim(t_img, tc.original_image))
-                test_losses.append(loss_test.item())
-            eval_results['PSNR'] = sum(test_psnrs) / len(test_psnrs)
-            eval_results['LOSS'] = sum(test_losses) / len(test_losses)
-            eval_results['SSIM'] = sum(test_ssims) / len(test_ssims)
-            psnr_track.append(eval_results['PSNR'])
-            json.dump(psnr_track, open(f"./output/{scene.model_name}/diff_idx_psnr.json", 'w+'))
-            loss_track.append(eval_results["LOSS"])
-            json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
-            ssim_track.append(eval_results['SSIM'])
-            json.dump(ssim_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
+        #    test_psnrs = []
+        #    test_losses = []
+        #    test_ssims = []
+        #    for tc in scene.getTestCameras():
+        #        t_img = render(tc, scene.gaussians, pipe, background, use_mlp=False)["render"]
+        #        test_psnrs.append(psnr(t_img, tc.original_image).mean().item())
+        #        test_ssims.append(ssim(t_img, tc.original_image).mean().item())
+        #        ll1_test = l1_loss(t_img, tc.original_image)
+        #        loss_test = (1.0 - opt.lambda_dssim) * ll1_test + opt.lambda_dssim * (1.0 - ssim(t_img, tc.original_image))
+        #        test_losses.append(loss_test.item())
+        #    eval_results['PSNR'] = sum(test_psnrs) / len(test_psnrs)
+        #    eval_results['LOSS'] = sum(test_losses) / len(test_losses)
+        #    eval_results['SSIM'] = sum(test_ssims) / len(test_ssims)
+        #    psnr_track.append(eval_results['PSNR'])
+        #    json.dump(psnr_track, open(f"./output/{scene.model_name}/diff_idx_psnr.json", 'w+'))
+        #    loss_track.append(eval_results["LOSS"])
+        #    json.dump(loss_track, open(f"./output/{scene.model_name}/diff_idx_loss.json", 'w+'))
+        #    ssim_track.append(eval_results['SSIM'])
+        #    json.dump(ssim_track, open(f"./output/{scene.model_name}/diff_idx_ssim.json", 'w+'))
 
 
         iter_end.record()
